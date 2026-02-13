@@ -1,0 +1,19 @@
+function() {
+var tag = document.querySelector(
+  'div[data-testid="miniBag-productTag-out-of-stock-read"]'
+);
+
+var numericId = null;
+
+if (tag) {
+  var article = tag.closest('article[data-testid]');
+  if (article) {
+    var testId = article.getAttribute('data-testid');
+    var match = testId.match(/\d+/);
+    if (match) {
+      numericId = match[0];
+    }
+  }
+}
+  return numericId;
+}
