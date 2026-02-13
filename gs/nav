@@ -1,0 +1,232 @@
+
+DECLARE datemin DATE DEFAULT CURRENT_DATE() - 1; --FIRST DAY IN RANGE - ROLLING DATES
+DECLARE datemax DATE DEFAULT CURRENT_DATE() - 1; --LAST DAY IN RANGE - ROLLING DATES
+
+-- DECLARE datemin DATE DEFAULT DATE '2025-12-20'; --FIRST DAY IN RANGE - SELECTED DATES
+-- DECLARE datemax DATE DEFAULT DATE '2025-12-21'; --LAST DAY IN RANGE - SELECTED DATES
+
+--DELETE & INSERT fresh data
+--DELETE FROM `gia-production-data-02636.gold.FACT_NAVIGATION` WHERE (DATE BETWEEN datemin and datemax );
+--INSERT INTO `gia-production-data-02636.gold.FACT_NAVIGATION` (DATE,COUNTRY,GENDER,PAGEGROUP,NAVLINK,USERS,SESSIONS,CLICKS,ORDERS,REVENUE)
+
+WITH ga_source AS (
+SELECT *
+--FROM `gia-production-int-27149.iceberg_bronze.analytics_261499685`
+FROM `gia-production-data-02636.transactions_tmp.analytics_261499685`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax )
+)--SELECT * FROM ga_temp;
+
+,a AS (
+SELECT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id, CAST(event_timestamp AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.float_value AS STRING), CAST(e.value.double_value AS STRING)) AS eVal
+FROM ga_source,UNNEST(event_params) AS e
+WHERE event_name='nav'
+AND e.key in ('page_location','element_name','element_value','ga_session_id')
+)
+
+,b0 AS (
+SELECT
+event_date,
+upid,
+stamp,
+MAX(IF(REGEXP_CONTAINS(eKey, '(?i)(page_loc)'), LOWER(eVal), NULL)) AS key1,
+MAX(IF(REGEXP_CONTAINS(eKey, '(?i)(element_name)'), LOWER(eVal), NULL)) AS key2,
+MAX(IF(REGEXP_CONTAINS(eKey, '(?i)(element_value)'), LOWER(eVal), NULL)) AS key3,
+MAX(IF(REGEXP_CONTAINS(eKey, '(?i)(ga_session_id)'), eVal, NULL)) AS key4
+FROM a
+GROUP BY event_date, upid, stamp
+)
+
+,b AS (
+SELECT
+event_date,
+upid,
+CONCAT(upid, key4) AS sid,
+stamp,
+key1,
+key2,
+key3
+FROM b0
+WHERE key4 IS NOT NULL  -- ADDED: Filter out null session numbers
+)
+
+,clicks AS (
+SELECT
+PARSE_DATE('%Y%m%d', event_date) AS date,
+CASE
+WHEN SUBSTR(key1, 9, 2) = 'au' THEN 'au'
+WHEN SUBSTR(key1, 9, 2) = 'ce' THEN 'blog'
+WHEN SUBSTR(key1, 9, 2) = 'ca' THEN 'ca'
+WHEN SUBSTR(key1, 9, 2) = 'ch' THEN 'ch'
+WHEN SUBSTR(key1, 9, 2) = 'de' THEN 'de'
+WHEN SUBSTR(key1, 9, 2) = 'dk' THEN 'dk'
+WHEN SUBSTR(key1, 9, 2) = 'eu' THEN 'eu'
+WHEN SUBSTR(key1, 9, 2) = 'fi' THEN 'fi'
+WHEN SUBSTR(key1, 9, 2) = 'fr' THEN 'fr'
+WHEN SUBSTR(key1, 9, 2) = 'nl' THEN 'nl'
+WHEN SUBSTR(key1, 9, 2) = 'no' THEN 'no'
+WHEN SUBSTR(key1, 9, 2) = 'ro' THEN 'ro'
+WHEN SUBSTR(key1, 9, 2) = 'se' THEN 'se'
+WHEN SUBSTR(key1, 9, 2) = 'su' THEN 'support'
+WHEN SUBSTR(key1, 9, 2) = 'uk' THEN 'uk'
+WHEN SUBSTR(key1, 9, 2) = 'ww' THEN 'us'
+ELSE 'us'
+END AS country,
+key2 AS gender,
+CASE
+WHEN REGEXP_CONTAINS(key1, '/collections/') THEN 'plp'
+WHEN REGEXP_CONTAINS(key1, '/products/') THEN 'pdp'
+WHEN REGEXP_CONTAINS(key1, 'shop-men|shop-women') THEN 'genderHome'
+WHEN REGEXP_CONTAINS(key1, '/pages/') THEN 'landingPage'
+ELSE 'home'
+END AS pageGroup,
+CASE
+WHEN REGEXP_CONTAINS(key3, '/collections/') THEN REGEXP_REPLACE(key3, '/collections/', '')
+ELSE key3
+END AS navLink,
+COUNT(DISTINCT upid) AS u,
+COUNT(DISTINCT sid) AS s,
+COUNT(sid) AS c
+FROM b
+GROUP BY date, country, gender, pageGroup, navLink
+)
+
+,ranked_events AS (
+SELECT *,
+ROW_NUMBER() OVER(PARTITION BY sid ORDER BY stamp DESC) as rn
+FROM b
+)
+
+,maxLink AS (
+SELECT
+event_date,
+sid,
+stamp AS maxStamp,
+key1,
+key2,
+key3
+FROM ranked_events
+WHERE rn = 1
+)
+
+,e1 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+,ecommerce.transaction_id AS tid
+,ecommerce.total_item_quantity AS qty
+,ecommerce.purchase_revenue_in_usd AS revUsd
+FROM ga_source,UNNEST(event_params) AS e
+WHERE event_name = 'purchase'
+AND e.key = 'ga_session_id'
+)
+
+,e AS (
+SELECT
+event_date,upid,CONCAT(upid,eval) AS sid,
+COUNT(tid) AS o,
+SUM(qty) AS q,
+SUM(revUsd) AS r
+FROM e1
+GROUP BY event_date, upid, sid
+)
+
+,orderLink AS (
+SELECT
+maxLink.event_date,
+maxLink.sid,
+maxLink.key1,
+maxLink.key2,
+maxLink.key3,
+e.o,
+e.r
+FROM maxLink
+LEFT JOIN e ON maxLink.sid = e.sid
+)
+
+,orders AS (
+SELECT
+PARSE_DATE('%Y%m%d', event_date) AS date,
+CASE
+WHEN SUBSTR(key1, 9, 2) = 'au' THEN 'au'
+WHEN SUBSTR(key1, 9, 2) = 'ce' THEN 'blog'
+WHEN SUBSTR(key1, 9, 2) = 'ca' THEN 'ca'
+WHEN SUBSTR(key1, 9, 2) = 'ch' THEN 'ch'
+WHEN SUBSTR(key1, 9, 2) = 'de' THEN 'de'
+WHEN SUBSTR(key1, 9, 2) = 'dk' THEN 'dk'
+WHEN SUBSTR(key1, 9, 2) = 'eu' THEN 'eu'
+WHEN SUBSTR(key1, 9, 2) = 'fi' THEN 'fi'
+WHEN SUBSTR(key1, 9, 2) = 'fr' THEN 'fr'
+WHEN SUBSTR(key1, 9, 2) = 'nl' THEN 'nl'
+WHEN SUBSTR(key1, 9, 2) = 'no' THEN 'no'
+WHEN SUBSTR(key1, 9, 2) = 'ro' THEN 'ro'
+WHEN SUBSTR(key1, 9, 2) = 'se' THEN 'se'
+WHEN SUBSTR(key1, 9, 2) = 'su' THEN 'support'
+WHEN SUBSTR(key1, 9, 2) = 'uk' THEN 'uk'
+WHEN SUBSTR(key1, 9, 2) = 'ww' THEN 'us'
+ELSE 'us'
+END AS country,
+key2 AS gender,
+CASE
+WHEN REGEXP_CONTAINS(key1, '/collections/') THEN 'plp'
+WHEN REGEXP_CONTAINS(key1, '/products/') THEN 'pdp'
+WHEN REGEXP_CONTAINS(key1, 'shop-men|shop-women') THEN 'genderHome'
+WHEN REGEXP_CONTAINS(key1, '/pages/') THEN 'landingPage'
+ELSE 'home'
+END AS pageGroup,
+CASE
+WHEN REGEXP_CONTAINS(key3, '/collections/') THEN REGEXP_REPLACE(key3, '/collections/', '')
+ELSE key3
+END AS navLink,
+SUM(o) AS o,
+SUM(r) AS r
+FROM orderLink
+WHERE o IS NOT NULL
+GROUP BY date, country, gender, pageGroup, navLink
+)
+
+,j as (
+SELECT
+clicks.date,
+clicks.country,
+clicks.gender,
+clicks.pageGroup,
+clicks.navLink,
+CAST(clicks.u AS INT64) AS users,
+CAST(clicks.s AS INT64) AS sessions,
+CAST(clicks.c AS INT64) AS clicks,
+CAST(COALESCE(orders.o, 0) AS INT64) AS orders,
+CAST(COALESCE(orders.r * 0.8, 0) AS INT64) AS revenue
+FROM clicks
+LEFT JOIN orders
+ON clicks.date = orders.date
+AND clicks.country = orders.country
+AND clicks.gender = orders.gender
+AND clicks.pageGroup = orders.pageGroup
+AND clicks.navLink = orders.navLink
+)
+
+--select * from j
+--
+select navLink,sum(sessions) as s from j group by all order by 2 desc
+
+
+
+
+
+
+
+
+
+
