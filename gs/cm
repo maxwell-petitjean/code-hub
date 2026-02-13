@@ -1,0 +1,270 @@
+
+-- CHANNEL_MASTER Full Reload Script
+-- Step 1: Delete existing data
+-- Step 2: Insert fresh data from tmp_ga_sessions_agg
+
+-- DELETE all existing data (or specify date range if you only want to reload recent data)
+-- Uncomment the line below to delete ALL data, or adjust the WHERE clause for specific dates
+-- DELETE FROM `gia-production-data-02636.gold.FACT_CHANNEL_MASTER` WHERE TRUE;
+
+DECLARE datemin DATE DEFAULT CURRENT_DATE() - 1; --FIRST DAY IN RANGE - ROLLING DATES
+DECLARE datemax DATE DEFAULT CURRENT_DATE() - 1; --LAST DAY IN RANGE - ROLLING DATES
+
+-- DECLARE datemin DATE DEFAULT DATE '2025-08-01'; --FIRST DAY IN RANGE - SELECTED DATES
+-- DECLARE datemax DATE DEFAULT DATE '2025-08-01'; --LAST DAY IN RANGE - SELECTED DATES
+
+DELETE FROM `gia-production-data-02636.gold.FACT_CHANNEL_MASTER`
+WHERE (DATE BETWEEN datemin and datemax );
+
+-- INSERT fresh data
+INSERT INTO `gia-production-data-02636.gold.FACT_CHANNEL_MASTER` (
+    DATE,
+    COUNTRY,
+    CHANNEL_GROUP,
+    CHANNEL,
+    SOURCE,
+    MEDIUM,
+    CAMPAIGN,
+    SESSIONS,
+    ORDERS,
+    REVENUE,
+    PRODUCT
+)
+
+WITH ga_temp AS (
+SELECT *
+FROM `gia-production-data-02636.transactions_tmp.analytics_254794223` --temp version of data
+--FROM `gia-production-int-27149.iceberg_bronze.ga_analytics_254794223` --full historic dataset
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax )
+)--SELECT * FROM ga_temp;
+
+,a as (--app attribution data
+SELECT distinct
+event_date
+,user_pseudo_id as upid
+,concat(user_pseudo_id,event_timestamp) as stamp
+,lower(event_name) as evName
+,e.key as eKey
+,COALESCE(
+      e.value.string_value,
+      CAST(e.value.int_value   AS STRING),
+      CAST(e.value.float_value AS STRING),
+      CAST(e.value.double_value AS STRING)
+    ) AS eVal
+from ga_temp
+,UNNEST(event_params) AS e
+where event_name IN ('app_attribution')
+AND e.key in ('utm_source','utm_medium','utm_campaign','clicked_link','ga_session_id')
+)--select * from a;
+
+,b0 as(
+select
+event_date
+,upid
+,stamp
+,case when eKey='ga_session_id' then lower(eVal) else null end as gasid
+,case when eKey='utm_source' then lower(eVal) else null end as source
+,case when eKey='utm_medium' then lower(eVal) else null end as medium
+,case when eKey='utm_campaign' then lower(eVal) else null end as campaign
+,case when eKey='clicked_link' then lower(eVal) else null end as link
+from a
+group by all
+order by stamp asc
+)--select * from b0;
+
+,b1 as(select distinct event_date,upid,stamp,gasid from b0 where gasid is not null order by stamp asc) --select * from b1
+,b2 as(select distinct event_date,upid,stamp,source from b0 where source is not null order by stamp asc) --select * from b2
+,b3 as(select distinct event_date,upid,stamp,medium from b0 where medium is not null order by stamp asc) --select * from b3
+,b4 as(select distinct event_date,upid,stamp,campaign from b0 where campaign is not null order by stamp asc) --select * from b4
+,b5 as(select distinct event_date,upid,stamp,link from b0 where link is not null order by stamp asc) --select * from b5
+
+,b6 as(
+select b1.event_date,b1.upid,b1.stamp,concat(b1.upid,'.',gasid) as sid,source,medium,campaign,link
+from b1
+left join b2 on b1.stamp = b2.stamp
+left join b3 on b1.stamp = b3.stamp
+left join b4 on b1.stamp = b4.stamp
+left join b5 on b1.stamp = b5.stamp
+where link is not null
+order by stamp asc
+)--select * from b6;
+
+,b7 AS (
+select b6.*, row_number()
+over (
+    PARTITION BY sid ORDER BY stamp DESC
+    ) AS rn
+from b6
+)--select * from b7;
+
+,b as(
+select
+PARSE_DATE('%Y%m%d', event_date) as d
+,upid,sid
+,CASE
+    WHEN (source IS NULL AND REGEXP_CONTAINS(link,'.*(gclid|gclsrc|wbraid|gbraid|dclid|gad_source)=.*')) THEN 'google'
+    WHEN (source IS NULL AND REGEXP_CONTAINS(link,'.*(msclkid)=.*')) THEN 'bing'
+    WHEN (source IS NULL AND REGEXP_CONTAINS(link,'.*(fbclid)=.*')) THEN 'meta'
+    ELSE source
+    END AS us
+,CASE
+    WHEN (source IS NULL AND REGEXP_CONTAINS(link,'.*(gclid|gclsrc|wbraid|gbraid|dclid|gad_source)=.*')) THEN 'cpc'
+    WHEN (source IS NULL AND REGEXP_CONTAINS(link,'.*(msclkid)=.*')) THEN 'cpc'
+    WHEN (source IS NULL AND REGEXP_CONTAINS(link,'.*(fbclid)=.*')) THEN 'paid_social'
+    ELSE medium
+    END AS um
+,campaign as uc
+,count(distinct stamp) as events
+from b7
+where rn=1 group by all
+)--select * from b order by sid;
+
+,j0 as(
+select
+event_date,session_key,user_pseudo_id,utm_source,utm_medium,utm_campaign,country_code,event_type --fact_sessions
+,us,um,uc --app_attribution
+from `gia-production-data-02636.gold.FACT_SESSIONS` as fs
+left join b on event_date=d and session_key=sid
+where ( event_date BETWEEN datemin and datemax )
+)--select * from j0 where us is not null order by session_key;
+
+,j1 as(
+select
+event_date,session_key,user_pseudo_id
+,lower(country_code) as c
+,case when event_type='WEB' then 'web' else 'app' end as p
+,case when us is not null then us else utm_source end as source
+,case when um is not null then um else utm_medium end as medium
+,case when uc is not null then uc else utm_campaign end as campaign
+from j0
+)--select * from j1 order by session_key;
+
+,om as (
+SELECT
+CAST(ORDER_TIMESTAMP_UTC AS DATE) AS om_d
+,SHOPIFY_ORDER_ID as om_soid
+,lower(country_code) as om_c
+,case when CHANNEL='WEB' then 'web' else 'app' end as om_p
+,sum(gross_gbp) as om_r
+FROM `gia-production-data-02636.gold.FACT_ORDER_JOURNEY`
+WHERE CHANNEL in ('ECOM_APP','WEB')
+AND ( CAST(ORDER_TIMESTAMP_UTC AS DATE) BETWEEN datemin and datemax )
+GROUP BY all
+)--select * from om;
+
+,gap as (
+SELECT distinct
+event_date as gap_d
+,session_key as gap_sid
+,SHOPIFY_ORDER_ID as gap_soid
+FROM `gia-production-data-02636.gold.FACT_DIGITAL_PURCHASE`
+WHERE session_key is not null
+AND ( EVENT_DATE BETWEEN datemin and datemax )
+)
+
+,omgap as (SELECT * FROM om LEFT JOIN gap on om_soid=gap_soid)
+,knownP as (SELECT * FROM omgap where gap_sid is not null)
+,unknownP as (SELECT * FROM omgap where gap_sid is null)
+--select om_d,om_c,om_p,count(distinct om_soid) as orders,sum(om_r) as rev from unknownP group by all order by rev desc
+
+,unknownOrders as (
+select om_d as DATE,om_p as PRODUCT
+,om_c as COUNTRY
+,'(direct)' as SOURCE
+,'(none)' as MEDIUM
+,'(direct)' as CAMPAIGN
+,0 as SESSIONS
+,count(distinct om_soid) as ORDERS
+,sum(om_r) as REVENUE
+from unknownP group by all order by REVENUE desc
+)--select * from unknownOrders;
+
+,j2 as (SELECT * FROM j1 LEFT JOIN knownP on session_key=gap_sid and event_date=om_d)
+--select * from j2 order by session_key;
+
+,j3 as (
+select
+event_date as d,p
+,case
+    when c in ('us','ca','nl','de','fr','au','se','no','fi','dk','ch') then lower(c)
+    when c='gb' then 'uk'
+    when c='nz' then 'au'
+    when c='at' then 'de'
+    else 'intl' end as country
+-- ,custom_channel_group
+-- ,channel
+,source,medium,campaign
+--,count(distinct user_pseudo_id) as u
+,count(distinct session_key) as s
+,count(distinct om_soid) as o
+,sum(om_r) as r
+from j2
+group by all
+)
+
+,u as (select * from unknownOrders union all select * from j3)
+--select * from u order by sessions desc
+
+select
+DATE
+,COUNTRY
+--CUSTOM_CHANNEL_GROUP created and owned by MP
+,CASE
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'(cpc)') AND REGEXP_CONTAINS(LOWER(CAMPAIGN), r'.*(shopping).*') THEN 'paid_search'
+    WHEN (SOURCE IS NULL OR LOWER(SOURCE) = '(direct)')
+    AND (MEDIUM IS NULL OR LOWER(MEDIUM) IN ('(none)', '(not set)')) THEN 'direct'
+    WHEN LOWER(MEDIUM) = 'organic' THEN 'organic_search'
+    WHEN (REGEXP_CONTAINS(LOWER(SOURCE), r'.*(^t.co$|^tt$|pangleglobal|linkedin|pin|facebook|fb|instagram|insta|ig|meta|snap|pinterest|tiktok|youtube|spotify|reddit|twitter|messenger).*') AND REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(paid).*')) OR REGEXP_CONTAINS(LOWER(SOURCE), r'.*(pangleglobal).*') THEN 'paid_social'
+    WHEN (REGEXP_CONTAINS(LOWER(SOURCE), r'.*(^t.co$|^tt$|linkedin|pin|facebook|fb|instagram|insta|ig|meta|snap|pinterest|tiktok|youtube|spotify|reddit|twitter|messenger).*') OR REGEXP_CONTAINS(LOWER(MEDIUM), r'^(social|social-network|social-media|sm|social network|social media)$')) AND LOWER(SOURCE) != 'aca' THEN 'organic_social'
+    WHEN REGEXP_CONTAINS(LOWER(SOURCE), r'.*(^train$|afterpay|trustpilot|latimes|app|molops|lemonde|shopify).*') OR REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(klarna|clearpay|afterpay|referral).*') THEN 'referral'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(email|text|transaction|sms|inbox|push).*') OR LOWER(MEDIUM) = 'iam' THEN 'crm'
+    WHEN LOWER(SOURCE) = 'aca' OR LOWER(MEDIUM) = 'aca' THEN 'aca'
+    WHEN LOWER(MEDIUM) LIKE '%affiliate%' OR LOWER(SOURCE) = 'partnerize' THEN 'affiliates'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'^(cpc|ppc|paidsearch)$') THEN 'paid_search'
+    WHEN REGEXP_CONTAINS(LOWER(SOURCE), r'(applovin)') OR REGEXP_CONTAINS(LOWER(MEDIUM), r'(display)') OR REGEXP_CONTAINS(LOWER(CAMPAIGN), r'.*(youtube.*video).*') THEN 'display'
+    ELSE 'other'
+    END AS CUSTOM_CHANNEL_GROUP
+--CUSTOM_CHANNEL created and owned by MP
+,CASE
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'(cpc)') AND REGEXP_CONTAINS(LOWER(CAMPAIGN), r'.*(shopping).*') THEN 'shopping'
+    WHEN REGEXP_CONTAINS(LOWER(CAMPAIGN), r'.*(pmax).*') THEN 'pmax'
+    WHEN (SOURCE IS NULL OR LOWER(SOURCE) = '(direct)')
+    AND (MEDIUM IS NULL OR LOWER(MEDIUM) IN ('(none)', '(not set)')) THEN 'direct'
+    WHEN LOWER(MEDIUM) = 'organic' THEN 'organic_search'
+    WHEN (REGEXP_CONTAINS(LOWER(SOURCE), r'.*(^t.co$|^tt$|pangleglobal|linkedin|pin|facebook|fb|instagram|insta|ig|meta|snap|pinterest|tiktok|youtube|spotify|reddit|twitter|messenger).*') AND REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(paid).*')) OR REGEXP_CONTAINS(LOWER(SOURCE), r'.*(pangleglobal).*') THEN 'paid_social'
+    WHEN (REGEXP_CONTAINS(LOWER(SOURCE), r'.*(^t.co$|^tt$|linkedin|pin|facebook|fb|instagram|insta|ig|meta|snap|pinterest|tiktok|youtube|spotify|reddit|twitter|messenger).*') OR REGEXP_CONTAINS(LOWER(MEDIUM), r'^(social|social-network|social-media|sm|social network|social media)$')) AND LOWER(SOURCE) != 'aca' THEN 'organic_social'
+    WHEN REGEXP_CONTAINS(LOWER(SOURCE), r'.*(^train$|afterpay|trustpilot|latimes|app|molops|lemonde|shopify).*') OR REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(klarna|clearpay|afterpay|referral).*') THEN 'referral'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(email|text|transaction).*') THEN 'email'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(sms).*') THEN 'sms'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(iam).*') THEN 'iam'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(inbox).*') THEN 'inbox'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'.*(push).*') THEN 'push'
+    WHEN LOWER(SOURCE) = 'aca' OR LOWER(MEDIUM) = 'aca' THEN 'aca'
+    WHEN LOWER(MEDIUM) LIKE '%affiliate%' OR LOWER(SOURCE) = 'partnerize' THEN 'affiliates'
+    WHEN REGEXP_CONTAINS(LOWER(MEDIUM), r'^(cpc|ppc|paidsearch)$') THEN 'paid_search'
+    WHEN REGEXP_CONTAINS(LOWER(SOURCE), r'(applovin)') OR REGEXP_CONTAINS(LOWER(MEDIUM), r'(display)') OR REGEXP_CONTAINS(LOWER(CAMPAIGN), r'.*(youtube.*video).*') THEN 'display'
+    WHEN REGEXP_CONTAINS(LOWER(SOURCE), r'.*(chatgpt.com|chat-gpt.org|claude.ai|quillbot.com|openai.com|blackbox.ai|perplexity.ai|copy.ai|jasper.ai|copilot.microsoft.com|gemini.google.com|mistral.ai|deepseek.com|edgepilot|edgeservices|nimble.ai|iask.ai|aitastic.app|bnngpt.com|writesonic.com|exa.ai|waldo)$') THEN 'ai_tools'
+    ELSE 'other'
+    END AS CHANNEL
+,SOURCE
+,MEDIUM
+,CAMPAIGN
+-- ,CAST(sessions AS INT64) AS sessions
+-- ,CAST(orders AS INT64) AS orders
+-- ,CAST(revenue AS NUMERIC) AS revenue
+-- ,sum(SESSIONS) as SESSIONS
+-- ,sum(ORDERS) as ORDERS
+-- ,sum(REVENUE) as REVENUE
+,CAST(sum(SESSIONS) AS INT64) as SESSIONS
+,CAST(sum(ORDERS) AS INT64) as ORDERS
+,CAST(sum(REVENUE) AS NUMERIC) as REVENUE
+,PRODUCT
+from u
+group by all
+order by sessions desc
+
+
+
+
+
+
