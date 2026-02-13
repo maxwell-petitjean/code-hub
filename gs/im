@@ -1,0 +1,297 @@
+
+-- BigQuery scripting: declare date window
+DECLARE datemin STRING DEFAULT '20260101';
+DECLARE datemax STRING DEFAULT '20260101';
+
+with raw_ga4 as (
+  select *
+  from `gymshark-rollup-5712.analytics_261499685.events_*` --web data
+  --from `gymshark-rollup-5712.analytics_254794223.events_*` --app data
+  where _TABLE_SUFFIX between datemin AND datemax
+)
+
+,a as (
+SELECT DISTINCT
+event_date
+,user_pseudo_id as upid
+,CONCAT(CAST(user_pseudo_id AS STRING),CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+,lower(trim(i.item_id)) as item_id
+,lower(trim(i.item_name)) as item_name
+,lower(trim(i.item_variant)) as item_variant
+,lower(trim(i.item_category)) as item_category
+,lower(trim(i.item_list_name)) as item_list_name
+from raw_ga4,UNNEST(event_params) AS e,UNNEST(items) AS i
+where event_name IN ('view_item_list','select_item')
+and e.key in ('page_location','ga_session_id')
+and item_list_name != 'pdp_recently-viewed'
+and i.item_id != '(not set)'
+and user_pseudo_id is not null
+--and user_pseudo_id = '1867915939.1753976312' --testing
+)--select * from a order by stamp;
+
+,b0 AS (
+SELECT
+event_date,evName,upid,stamp
+,item_id,item_name,item_variant,item_category,item_list_name
+,CASE WHEN eKey = 'ga_session_id' THEN LOWER(eVal) ELSE NULL END AS key1
+,CASE WHEN eKey = 'page_location' THEN LOWER(eVal) ELSE NULL END AS key2
+FROM a
+)--select * from b0 order by stamp;
+
+,b1 AS (SELECT DISTINCT event_date,evName,upid,stamp,item_id,item_name,item_variant,item_category,item_list_name,key1 FROM b0 WHERE key1 IS NOT NULL)
+,b2 AS (SELECT DISTINCT event_date,evName,upid,stamp,item_id,item_name,item_variant,item_category,item_list_name,key2 FROM b0 WHERE key2 IS NOT NULL)
+
+,b5 AS (
+SELECT
+b1.event_date,b1.evName,b1.upid,b1.stamp
+,b2.key2
+,case
+    when right(left(b2.key2,10),2) = 'ww' then 'us'
+    else right(left(b2.key2,10),2)
+    end as country
+,concat(b1.upid,key1) as sid
+,item_id,item_name,item_variant,item_category,item_list_name
+FROM b1
+LEFT JOIN b2 USING (event_date,upid,stamp,item_id,item_name,item_variant,item_category,item_list_name)
+)--select * from b5 order by stamp;
+
+,b AS ( --impressions & clicks by item
+SELECT
+event_date,country
+,item_list_name,item_category,item_id,item_name,item_variant
+,upid,sid
+,COUNT(DISTINCT IF(evName='view_item_list', stamp, NULL)) AS imp
+,COUNT(DISTINCT IF(evName='select_item', stamp, NULL)) AS click
+-- ,COUNT(DISTINCT IF(evName='view_item_list', sid, NULL)) AS simp
+-- ,COUNT(DISTINCT IF(evName='select_item', sid, NULL)) AS sclick
+-- ,COUNT(DISTINCT IF(evName='view_item_list', upid, NULL)) AS uimp
+-- ,COUNT(DISTINCT IF(evName='select_item', upid, NULL)) AS uclick
+FROM b5
+GROUP BY all
+)--select * from b order by imps desc;
+
+--------------------------------------------------------------------------------
+--max stamp
+
+,a1 AS --final impression of each product
+(
+SELECT event_date,upid,sid,item_name,item_variant,max(stamp) as maxImp from b5 where evName='view_item_list' group by all
+)--select * from a1 order by sid,item_name,item_variant;
+
+,a2 AS --final impression of each product within a list
+(
+SELECT event_date,upid,sid,item_name,item_variant,item_list_name,max(stamp) as hitImp from b5 where evName='view_item_list' group by all
+)--select * from a2 order by sid,item_name,item_variant;
+
+,m as --final impression of each product with list appended
+(
+select
+a1.*
+,a2.item_list_name
+from a1 left join a2 USING (event_date,upid,sid,item_name,item_variant)
+)--select * from m order by sid,maxImp,item_name,item_variant;
+
+--------------------------------------------------------------------------------
+--list mapping
+
+,lm0 AS ( --impressions & clicks by item
+SELECT
+event_date,country,item_list_name
+-- ,key2
+-- ,regexp_replace(key2,'(\\?).*','') as path1
+-- ,regexp_replace(key2,'.*(shark.com/)','') as path2
+,regexp_replace(regexp_replace(key2,'(\\?).*',''),'.*(shark.com/)','') as path
+,count(distinct upid) as users
+FROM b5
+where key2 like '%/collections/%' and item_list_name like 'plp%'
+GROUP BY all
+)--select * from lm0 order by users desc;
+
+,lm AS (
+select * from lm0
+QUALIFY ROW_NUMBER() OVER (
+PARTITION BY event_date, country, item_list_name
+ORDER BY users DESC ) = 1
+)--select * from lm order by item_list_name,users desc;
+
+--------------------------------------------------------------------------------
+--atc and checkout
+
+,c AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id as upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+,lower(trim(i.item_name)) as item_name
+,lower(trim(i.item_variant)) as item_variant
+from raw_ga4,UNNEST(event_params) AS e,UNNEST(items) AS i
+where event_name IN ('add_to_cart','begin_checkout','view_item')
+AND e.key IN ('ga_session_id')
+)--select * from c order by stamp;
+
+,d1 as (
+select
+event_date
+,upid
+,CONCAT(upid,eVal) AS sid
+,item_name,item_variant
+,case when evName in ('view_item') then 1 else 0 end as v1
+,case when evName in ('add_to_cart') then 1 else 0 end as a1
+,case when evName in ('begin_checkout') then 1 else 0 end as c1
+,sum(case when evName in ('view_item') then 1 else 0 end) as v2
+,sum(case when evName in ('add_to_cart') then 1 else 0 end) as a2
+,sum(case when evName in ('begin_checkout') then 1 else 0 end) as c2
+from c
+group by all
+)--select * from d1 order by sid asc;
+
+,d as(
+select
+event_date,upid,sid,item_name,item_variant
+,sum(v1) as vi,sum(a1) as atc,sum(c1) as checkout,sum(v2) as viewCount,sum(a2) as atcCount,sum(c2) as checkoutCount
+from d1
+group by all
+)--select * from d order by sid asc;
+
+--------------------------------------------------------------------------------
+--purchase
+
+,e1 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id as upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+,ecommerce.transaction_id as tid
+,lower(trim(i.item_name)) as item_name
+,lower(trim(i.item_variant)) as item_variant
+,i.quantity,i.price_in_usd
+,(i.quantity*i.price_in_usd) as gross_rev_usd
+from raw_ga4,UNNEST(event_params) AS e,UNNEST(items) AS i
+where event_name IN ('purchase')
+AND e.key IN ('ga_session_id')
+and ecommerce.transaction_id is not null
+)--select * from e1 order by tid;
+
+,e as (
+select
+event_date,upid
+,CONCAT(upid,eVal) AS sid
+,item_name,item_variant
+,count(distinct tid) as o
+,sum(quantity) as q
+,sum(gross_rev_usd) as r
+from e1
+group by all
+)--select * from e;
+
+,j0 as ( --join atc/checkout/purchase
+select * from d
+left join e USING (event_date,upid,sid,item_name,item_variant)
+)--select * from j0 order by sid,item_name,item_variant;
+
+,j1 as ( --add listname to atc/checkout/purchase
+select * from j0
+left join m USING (event_date,upid,sid,item_name,item_variant)
+)--select * from j1 order by sid,item_name,item_variant;
+
+,j2 as ( --add atc/checkout/purchase to imps and clicks data
+select * from b
+left join j1 USING (event_date,upid,sid,item_name,item_variant,item_list_name)
+)--select * from j2 order by sid,item_name,item_variant;
+
+,j3 as ( -- clean atc/checkout/purchase
+select
+event_date,country,item_id,item_name,item_variant,item_category,item_list_name
+,sum(imp) as imp
+,COUNT(DISTINCT IF(imp>=1, sid, NULL)) AS simp
+,COUNT(DISTINCT IF(imp>=1, upid, NULL)) AS uimp
+
+,sum(click) as click
+,COUNT(DISTINCT IF(click>=1, sid, NULL)) AS sclick
+,COUNT(DISTINCT IF(click>=1, upid, NULL)) AS uclick
+
+,sum(vi) as views
+,COUNT(DISTINCT IF(vi>=1, sid, NULL)) AS sview
+,COUNT(DISTINCT IF(vi>=1, upid, NULL)) AS uview
+
+,COUNT(DISTINCT IF(atc>=1, upid, NULL)) AS uatc
+,COUNT(DISTINCT IF(checkout>=1, upid, NULL)) AS uche
+,sum(atc) as atc_sessions
+,sum(checkout) as che_sessions
+,sum(atcCount) as atc_count
+,sum(checkoutCount) as che_count
+,sum(o) as o
+,sum(q) as q
+,sum(r) as r
+from j2 group by all
+)--select * from 3 order by simp desc;
+
+,j as ( --add url
+select * from j3
+left join lm USING (event_date,country,item_list_name)
+)--select * from j order by simp desc;
+
+select distinct
+event_date,country
+,case
+    when path is not null then path
+    when item_list_name like 'pdp%' then 'pdp'
+    when item_list_name like 'home%' then 'home'
+    when item_list_name like 'search%' then 'search'
+    when item_list_name = 'minicart' then 'minicart'
+    when item_list_name like '%blog%' then 'blog'
+    else 'other' end as url
+,case
+    when regexp_contains(item_list_name,'pdp.*get.*the.*') then 'pdp_get_the_look'
+    else regexp_replace(item_list_name,'( |-)','_')
+    end as list_name
+,item_category as category,item_name as name,item_variant as colour,item_id
+,imp as impression_count
+,simp as impression_sessions
+,uimp as impression_users
+,click as click_count
+,sclick as click_sessions
+,uclick as click_users
+,views as view_count
+,sview as view_sessions
+,uview as view_users
+,atc_count
+,atc_sessions
+,uatc as atc_users
+,che_count as checkout_count
+,che_sessions as checkout_sessions
+,uche as checkout_users
+,o as orders
+,q as qty
+,round((r)*0.8,2) as revenue
+from j
+order by impression_count desc;
+
+
+
+
+
