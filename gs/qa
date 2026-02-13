@@ -1,0 +1,134 @@
+with a as (
+select cast(date as date) as d, sum(sessions) as sessions_agg
+from gia-production-data-02636.gold.FACT_SESSIONS_AGG where date >= '2025-11-01' group by all
+)--select * from a order by 1 desc;
+
+,b as (
+select cast(event_date as date) as d1, sum(sessions) as home_master
+from gia-production-data-02636.gold.FACT_HOME_MASTER group by all
+)--select * from b order by 1 desc;
+
+,c as (
+select cast(visitdate as date) as d1, sum(impsessions) as list_master
+from gia-production-data-02636.gold.FACT_LIST_MASTER group by all
+)--select * from c order by 1 desc;
+
+,d as (
+select cast(event_date as date) as d1, sum(pdp_sessions) as item_master
+from gia-production-data-02636.gold.FACT_ITEM_MASTER group by all
+)--select * from d order by 1 desc;
+
+,e as (
+select cast(date as date) as d1, sum(impressions) as prod_master
+from gia-production-data-02636.gold.FACT_ECOM_FUNNEL_PRODUCTS group by all
+)--select * from e order by 1 desc;
+
+,f as (
+select cast(date as date) as d1, sum(sessions) as navigation
+from gia-production-data-02636.gold.FACT_NAVIGATION group by all
+)--select * from f order by 1 desc;
+
+,g as (
+select cast(event_date as date) as d1, sum(sessions) as search_master
+from gia-production-data-02636.gold.FACT_SEARCH_QUERIES group by all
+)--select * from g order by 1 desc;
+
+,h as (
+select cast(event_date as date) as d1, sum(sessions) as app_attribution
+from gia-production-data-02636.gold.FACT_APP_ATTRIBUTION group by all
+)--select * from h order by 1 desc;
+
+,i as (
+select cast(date as date) as d1, sum(sessions) as channel_master
+from gia-production-data-02636.gold.FACT_CHANNEL_MASTER group by all
+)--select * from i order by 1 desc;
+
+,j as (
+select cast(visitdate as date) as d1, sum(impressions) as blog_list
+from gia-production-data-02636.gold.FACT_LIST_MASTER_BLOG group by all
+)--select * from j order by 1 desc;
+
+,k as (
+select cast(visitdate as date) as d1, sum(sessions) as blog_value
+from gia-production-data-02636.gold.FACT_BLOG_VALUE group by all
+)--select * from k order by 1 desc;
+
+,l as (
+select cast(date as date) as d1, sum(sessions) as blog_clicks
+from gia-production-data-02636.gold.FACT_BLOG_CLICKS group by all
+)--select * from l order by 1 desc;
+
+,m as (
+select cast(date as date) as d1,sum(sessions) as chiefs_funnel
+from gia-production-data-02636.gold.FACT_CLEAN_ECOM_FUNNEL where journeystep = 'all' group by all
+)--select * from m order by 1 desc;
+
+,n as (
+select cast(date as date) as d1,sum(sessions) as mm_events
+from gia-production-data-02636.gold.FACT_MONEY_MAP_EVENTS where event = 'all_sessions' group by all
+)--select * from n order by 1 desc;
+
+,o as (
+select cast(event_date as date) as d1,sum(sessions) as mm_d_pdp
+from gia-production-data-02636.gold.FACT_MONEY_MAP_DETAIL_PDP group by all
+)--select * from o order by 1 desc;
+
+,p as (
+select cast(event_date as date) as d1,sum(sessions) as mm_d_plp
+from gia-production-data-02636.gold.FACT_MONEY_MAP_DETAIL_PLP group by all
+)--select * from p order by 1 desc;
+
+,q as (
+select cast(date as date) as d1,sum(sessions) as mm_d_recs
+from gia-production-data-02636.gold.FACT_MONEY_MAP_DETAIL_RECS group by all
+)--select * from q order by 1 desc;
+
+,r as (
+select cast(date as date) as d1,sum(sessions) as mm_d_search
+from gia-production-data-02636.gold.FACT_MONEY_MAP_DETAIL_SEARCH group by all
+)--select * from r order by 1 desc;
+
+,s as (
+select cast(event_date as date) as d1,sum(sessions) as plp_filter
+from gia-production-data-02636.gold.FACT_PLP_FILTER_SELECTION group by all
+)--select * from s order by 1 desc;
+
+,t as (
+select cast(event_date as date) as d1,sum(users) as stock
+from gia-production-data-02636.gold.FACT_STOCK_AVAILABILITY group by all
+)--select * from t order by 1 desc;
+
+,zz as (
+select cast(event_date as date) as d1, count(distinct session_key) as fact_sess
+from gia-production-data-02636.gold.FACT_SESSIONS group by all
+)--select * from zz order by 1 desc;
+
+select
+a.d,sessions_agg,fact_sess,chiefs_funnel,mm_events
+,channel_master
+,home_master,navigation,list_master,item_master,prod_master,search_master,plp_filter
+,blog_list,blog_value,blog_clicks
+,stock
+,mm_d_pdp,mm_d_plp,mm_d_recs,mm_d_search
+from a
+left join b on a.d = b.d1
+left join c on a.d = c.d1
+left join d on a.d = d.d1
+left join e on a.d = e.d1
+left join f on a.d = f.d1
+left join g on a.d = g.d1
+left join h on a.d = h.d1
+left join i on a.d = i.d1
+left join j on a.d = j.d1
+left join k on a.d = k.d1
+left join l on a.d = l.d1
+left join m on a.d = m.d1
+left join n on a.d = n.d1
+left join o on a.d = o.d1
+left join p on a.d = p.d1
+left join q on a.d = q.d1
+left join r on a.d = r.d1
+left join s on a.d = s.d1
+left join t on a.d = t.d1
+left join zz on a.d = zz.d1
+order by a.d desc;
