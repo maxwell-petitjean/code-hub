@@ -1,0 +1,94 @@
+
+-------------------------------------------------------------------------
+--RAW DATA - TEMP
+
+DECLARE datemin DATE DEFAULT CURRENT_DATE() - 2; --FIRST DAY IN RANGE - ROLLING DATES
+DECLARE datemax DATE DEFAULT CURRENT_DATE() - 2; --LAST DAY IN RANGE - ROLLING DATES
+
+WITH ga_source_app AS ( SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_254794223`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax ) )
+
+-------------------------------------------------------------------------
+--user properties
+
+,up AS --all user parameters
+(
+SELECT DISTINCT
+event_date
+--,device.operating_system
+,u.key AS uKey
+-- ,COALESCE(
+--   u.value.string_value,
+--   CAST(u.value.int_value   AS STRING),
+--   CAST(u.value.float_value AS STRING),
+--   CAST(u.value.double_value AS STRING)
+--   ) AS uVal
+,count(distinct if(device.operating_system='Android',user_pseudo_id,null)) as android_users
+,count(distinct if(device.operating_system='iOS',user_pseudo_id,null)) as ios_users
+from ga_source_app, unnest(user_properties) AS u
+where u.key in ('customerId','user_id','ga_session_id','gender')
+group by all order by ios_users desc
+)--select * from up;
+
+-------------------------------------------------------------------------
+--user_id quality
+
+,uid AS --all user parameters
+(
+SELECT DISTINCT
+event_date
+,device.operating_system
+,u.key AS uKey
+,u.value.string_value
+,user_pseudo_id as upid
+from ga_source_app, unnest(user_properties) AS u
+where u.key in ('user_id') and device.operating_system='Android'
+group by all order by upid
+)--select * from uid;
+
+-------------------------------------------------------------------------
+--event properties
+
+,ep AS --all event paramters
+(
+SELECT DISTINCT
+event_date
+--,device.operating_system
+--,LOWER(event_name) AS evName
+,e.key AS eKey
+-- ,COALESCE(
+--   e.value.string_value,
+--   CAST(e.value.int_value   AS STRING),
+--   CAST(e.value.float_value AS STRING),
+--   CAST(e.value.double_value AS STRING)
+--   ) AS eVal
+,count(distinct if(device.operating_system='Android',concat(user_pseudo_id,event_timestamp),null)) as android_events
+,count(distinct if(device.operating_system='iOS',concat(user_pseudo_id,event_timestamp),null)) as ios_events
+from ga_source_app,unnest(event_params) AS e
+where e.key in ('ga_session_id','screen_name','element_name','value','element_value','customer_id','mpid')
+group by all order by ios_events desc
+)--select * from ep;
+
+-------------------------------------------------------------------------
+--value v el_val
+
+,v AS --all event paramters
+(
+SELECT DISTINCT
+event_date
+--,device.operating_system
+,LOWER(event_name) AS evName
+,e.key AS eKey
+-- ,COALESCE(
+--   e.value.string_value,
+--   CAST(e.value.int_value   AS STRING),
+--   CAST(e.value.float_value AS STRING),
+--   CAST(e.value.double_value AS STRING)
+--   ) AS eVal
+,count(distinct if(device.operating_system='Android',concat(user_pseudo_id,event_timestamp),null)) as android_events
+,count(distinct if(device.operating_system='iOS',concat(user_pseudo_id,event_timestamp),null)) as ios_events
+from ga_source_app,unnest(event_params) AS e
+where e.key in ('element_name','value','element_value')
+group by all order by ios_events desc
+)--
+select * from v;
