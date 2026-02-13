@@ -1,0 +1,343 @@
+
+
+-- DECLARE datemin DATE DEFAULT CURRENT_DATE() - 2; --FIRST DAY IN RANGE - ROLLING DATES
+-- DECLARE datemax DATE DEFAULT CURRENT_DATE() - 2; --LAST DAY IN RANGE - ROLLING DATES
+
+DECLARE datemin DATE DEFAULT DATE '2025-12-01'; --FIRST DAY IN RANGE - SELECTED DATES
+DECLARE datemax DATE DEFAULT DATE '2025-12-31'; --LAST DAY IN RANGE - SELECTED DATES
+
+--DELETE & INSERT fresh data
+DELETE FROM `gia-production-data-02636.gold.FACT_CLEAN_ECOM_FUNNEL` WHERE (DATE BETWEEN datemin and datemax ) and (journeystep not in ('all','purchase'));
+INSERT INTO `gia-production-data-02636.gold.FACT_CLEAN_ECOM_FUNNEL` (DATE,PRODUCT,COUNTRY,JOURNEYSTEP,SESSIONS,USERS,PAGEGROUP)
+
+-------------------------------------------------------------------------
+--RAW DATA
+
+WITH ga_source_app AS (
+--SELECT * FROM `gia-production-int-27149.iceberg_bronze.ga_analytics_254794223`
+SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_254794223`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax )
+)
+
+,ga_source_web AS (
+--SELECT * FROM `gia-production-int-27149.iceberg_bronze.analytics_261499685`
+SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_261499685`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax )
+)
+
+
+-------------------------------------------------------------------------
+--APP_LIST_CLICK
+
+,app_list_click_source AS (
+SELECT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,geo.country
+,user_pseudo_id AS upid
+,COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) AS eVal
+,CONCAT( user_pseudo_id , COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) ) AS sid
+FROM ga_source_app,UNNEST(items) AS i,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND e.key = 'ga_session_id'
+AND event_name = 'select_item'
+AND ( i.item_list_name = '(not set)' OR STARTS_WITH(i.item_list_name, 'plp') OR REGEXP_CONTAINS(i.item_list_name, r'.*( m)$|.*( f)$') )
+)--select * from app_list_click_source;
+
+,cte_1_app_list_click AS (
+SELECT
+date,
+'app' AS product,
+country,
+'listClick' AS action,
+COUNT(DISTINCT sid) AS sessions,
+COUNT(DISTINCT upid) AS users
+FROM app_list_click_source
+GROUP BY all
+)
+--DATE,PRODUCT,COUNTRY,ACTION,SESSIONS,USERS
+
+-------------------------------------------------------------------------
+--APP_LIST_VIEW
+
+,app_list_view_source AS (
+SELECT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,geo.country
+,user_pseudo_id AS upid
+,COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) AS eVal
+,CONCAT( user_pseudo_id , COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) ) AS sid
+FROM ga_source_app,UNNEST(items) AS i,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND e.key = 'ga_session_id'
+AND event_name = 'view_item_list'
+AND ( i.item_list_name = '(not set)' OR STARTS_WITH(i.item_list_name, 'plp') OR REGEXP_CONTAINS(i.item_list_name, r'.*( m)$|.*( f)$') )
+)
+
+,cte_2_app_list_view AS (
+SELECT
+date,
+'app' AS product,
+country,
+'listView' AS action,
+COUNT(DISTINCT sid) AS sessions,
+COUNT(DISTINCT upid) AS users
+FROM app_list_view_source
+GROUP BY all
+)
+--DATE,PRODUCT,COUNTRY,ACTION,SESSIONS,USERS
+
+-------------------------------------------------------------------------
+--OTHER EVENTS - APP AND WEB
+
+,rawApp_3 AS (
+SELECT DISTINCT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,geo.country
+,lower(event_name) as evName
+,user_pseudo_id AS upid
+,COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) AS eVal
+,CONCAT( user_pseudo_id , COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) ) AS sid
+FROM ga_source_app,UNNEST(items) AS i,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND event_name IN ('view_promotion','select_promotion','view_item','add_to_cart','begin_checkout')
+AND e.key = 'ga_session_id'
+)
+
+,cleanApp_3 AS (
+SELECT
+date,
+'app' AS product,
+country,
+evName AS action,
+COUNT(distinct sid) AS sessions,
+COUNT(DISTINCT upid) AS users
+FROM rawApp_3
+GROUP BY all
+)
+
+,rawWebB1_3 AS (
+SELECT DISTINCT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,geo.country
+,lower(event_name) as evName
+,user_pseudo_id AS upid
+,COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) AS eVal
+,CONCAT( user_pseudo_id , COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) ) AS sid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+FROM ga_source_web,UNNEST(items) AS i,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND event_name IN ('view_promotion','select_promotion','view_item','add_to_cart','begin_checkout','homepage')
+AND e.key = 'ga_session_id'
+)
+
+,rawWebB2_3 AS (
+SELECT DISTINCT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,geo.country
+,lower(event_name) as evName
+,user_pseudo_id AS upid
+,COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) AS eVal
+,CONCAT( user_pseudo_id , COALESCE( e.value.string_value, CAST(e.value.int_value AS STRING), CAST(e.value.double_value AS STRING), CAST(e.value.float_value AS STRING) ) ) AS sid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+FROM ga_source_web,UNNEST(items) AS i,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND event_name IN ('view_promotion','select_promotion','view_item','add_to_cart','begin_checkout','homepage')
+AND e.key = 'page_location'
+)
+
+,rawWebB3_3 AS(
+SELECT b1.date, b1.upid, b1.sid, b1.stamp, b1.country, b1.evName, b2.eVal
+FROM rawWebB1_3 b1 LEFT JOIN rawWebB2_3 b2 ON b1.stamp = b2.stamp and b1.date = b2.date and b1.evName = b2.evName
+)
+
+,cleanWeb_3 AS (
+SELECT
+date
+,'web' AS product
+,country
+,evName AS action
+,COUNT(DISTINCT sid) AS sessions
+,COUNT(DISTINCT upid) AS users
+FROM rawWebB3_3
+GROUP BY all
+)
+
+,eventTable_3 AS (
+SELECT * FROM cleanApp_3 UNION ALL SELECT * FROM cleanWeb_3
+)
+
+,cte_3_other_events AS (
+SELECT
+date,
+product,
+country,
+action,
+SUM(sessions) AS sessions,
+SUM(users) AS users
+FROM eventTable_3
+group by all
+)
+--DATE,PRODUCT,COUNTRY,ACTION,SESSIONS,USERS
+
+
+-------------------------------------------------------------------------
+--WEB_HOME
+
+,whome AS (
+SELECT DISTINCT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,geo.country
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+FROM ga_source_web,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND event_name IN ('page_view','homepage')
+AND e.key in ('page_location','ga_session_id')
+)--select * from whome order by stamp;
+
+,w0 AS (
+SELECT
+date
+,evName,country
+,upid
+,stamp
+,CASE WHEN eKey = 'page_location' THEN LOWER(eVal) ELSE NULL END AS key1
+,CASE WHEN eKey = 'ga_session_id' THEN LOWER(eVal) ELSE NULL END AS key2
+FROM whome
+)
+
+,w1 AS (SELECT DISTINCT date,evName,country,upid,stamp,key1 FROM w0 WHERE key1 IS NOT NULL)
+,w2 AS (SELECT DISTINCT date,evName,country,upid,stamp,key2 FROM w0 WHERE key2 IS NOT NULL)
+
+,w5 AS (
+SELECT
+w1.date,w1.evName,w1.country,w1.upid,w1.stamp
+,key1
+,REGEXP_REPLACE(REGEXP_REPLACE(key1,'.*(shark.com/)','/'),'(\\?|=banner).*','')
+,CONCAT(w1.upid,key2) AS sid
+FROM w1
+LEFT JOIN w2 USING (date, evName, upid, stamp)
+where REGEXP_REPLACE(REGEXP_REPLACE(key1,'.*(shark.com/)','/'),'(\\?|=banner).*','') = '/'
+)
+
+,cte_4_web_home AS (
+SELECT
+date
+,'web' as product
+,country
+,evName as action
+--,COUNT(DISTINCT stamp) AS events
+,COUNT(DISTINCT sid) AS sessions
+,COUNT(DISTINCT upid) AS users
+FROM w5
+GROUP BY all
+)
+
+-------------------------------------------------------------------------
+--WEB_LIST_VIEW & CLICK
+
+,wlist0 AS (
+SELECT DISTINCT
+PARSE_DATE('%Y%m%d', event_date) AS date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,geo.country
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+,lower(trim(i.item_list_name)) as item_list_name
+FROM ga_source_web,UNNEST(items) AS i,UNNEST(event_params) AS e
+WHERE PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax
+AND event_name IN ('view_item_list','select_item')
+AND e.key in ('ga_session_id')
+and TRIM(LOWER(i.item_list_name)) like '%plp%'
+)
+
+,cte_5_web_list AS (
+SELECT
+date
+,'web' AS product
+,country
+,evName as action
+--,COUNT(DISTINCT stamp) AS events
+,COUNT(DISTINCT concat(upid,eVal) ) AS sessions
+,COUNT(DISTINCT upid) AS users
+FROM wlist0
+GROUP BY all
+)
+
+
+-- Combine all steps
+,combined_steps AS (
+SELECT * FROM cte_1_app_list_click
+UNION ALL
+SELECT * FROM cte_2_app_list_view
+UNION ALL
+SELECT * FROM cte_3_other_events
+UNION ALL
+SELECT * FROM cte_4_web_home
+UNION ALL
+SELECT * FROM cte_5_web_list
+)
+
+
+--Final aggregation and schema mapping
+SELECT
+date
+,product
+,CASE
+  WHEN country = 'United Kingdom' THEN 'uk'
+  WHEN country = 'United States' THEN 'us'
+  WHEN country = 'Netherlands' THEN 'nl'
+  WHEN country = 'France' THEN 'fr'
+  WHEN country = 'Germany' THEN 'de'
+  WHEN country = 'Austria' THEN 'de'
+  WHEN country = 'Canada' THEN 'ca'
+  WHEN country = 'Australia' THEN 'au'
+  WHEN country = 'New Zealand' THEN 'au'
+  WHEN country = 'Norway' THEN 'no'
+  WHEN country = 'Sweden' THEN 'se'
+  WHEN country = 'Finland' THEN 'fi'
+  WHEN country = 'Switzerland' THEN 'ch'
+  WHEN country = 'Denmark' THEN 'dk'
+  ELSE 'intl'
+  END AS country
+,CASE
+  WHEN action in ('page_view','view_promotion') THEN 'homeView'
+  WHEN action in ('homepage','select_promotion') THEN 'homeClick'
+  WHEN action in ('view_item_list','listView') THEN 'listView'
+  WHEN action in ('select_item','listClick') THEN 'listClick'
+  WHEN action in ('view_item') THEN 'productView'
+  WHEN action in ('add_to_cart') THEN 'addToCart'
+  WHEN action in ('begin_checkout') THEN 'checkoutStart'
+  ELSE 'action' END as journeystep
+,SUM(sessions) AS sessions
+,SUM(users) AS users
+,'other' as pageGroup
+FROM combined_steps
+GROUP BY all
+
+
+--DATE,PRODUCT,COUNTRY,JOURNEYSTEP,SESSIONS,USERS,PAGEGROUP
+
+
+
+
+
+
+
+
+
