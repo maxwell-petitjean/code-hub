@@ -1,0 +1,174 @@
+
+
+-------------------------------------------------------------------------
+--RAW DATA - TEMP
+
+-- DECLARE datemin DATE DEFAULT CURRENT_DATE() - 3; --FIRST DAY IN RANGE - ROLLING DATES
+-- DECLARE datemax DATE DEFAULT CURRENT_DATE() - 1; --LAST DAY IN RANGE - ROLLING DATES
+
+-- WITH ga_source_app AS ( SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_254794223`
+-- WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax ) )
+
+-------------------------------------------------------------------------
+--RAW DATA - BRONZE
+
+DECLARE datemin DATE DEFAULT DATE '2026-02-03'; --FIRST DAY IN RANGE - SELECTED DATES
+DECLARE datemax DATE DEFAULT DATE '2026-02-11'; --LAST DAY IN RANGE - SELECTED DATES
+
+WITH ga_source_app AS ( SELECT * FROM `gia-production-int-27149.iceberg_bronze.ga_analytics_254794223`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax ) )
+
+-------------------------------------------------------------------------
+--EVENTS DATA
+
+,test_users AS --all test users
+(
+SELECT DISTINCT
+event_date
+,user_pseudo_id as upid
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+,u.key AS uKey
+,COALESCE(
+  u.value.string_value,
+  CAST(u.value.int_value   AS STRING),
+  CAST(u.value.float_value AS STRING),
+  CAST(u.value.double_value AS STRING)
+  ) AS uVal
+from ga_source_app, unnest(user_properties) AS u,unnest(event_params) AS e
+WHERE user_pseudo_id is not null
+and event_name in ('screen_view')
+and e.key in ('ga_session_id')
+and u.key in ('firebase_exp_91','firebase_exp_92')
+)--select * from test_users;
+
+,tu AS ( --list of upids and sids per variant
+select distinct
+event_date
+,upid
+,concat(upid,eVal) as sid
+,uKey as exp
+,uVal as var
+from test_users
+)--select * from tu;
+
+--------------------------------------------------------------------------------
+--key events: vi / atc / checkout
+
+,ea0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+from ga_source_app,UNNEST(event_params) AS e
+where event_name IN ('view_item','add_to_cart','begin_checkout')
+AND e.key IN ('ga_session_id')
+)
+
+,ea1 as (
+select
+event_date
+,upid
+,CONCAT(upid,eVal) AS sid
+
+,sum(case when evName in ('view_item') then 1 else 0 end) as v1
+,sum(case when evName in ('add_to_cart') then 1 else 0 end) as a1
+,sum(case when evName in ('begin_checkout') then 1 else 0 end) as c1
+
+from ea0
+group by all
+)
+
+,ea as(
+select
+event_date,upid,sid
+,sum(v1) as vit
+,sum(a1) as atc
+,sum(c1) as che
+from ea1
+group by all
+)
+
+--------------------------------------------------------------------------------
+--purchase
+
+,pa0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,LOWER(event_name) AS evName
+,ecommerce.transaction_id as tid
+,ecommerce.total_item_quantity as qty
+,ecommerce.purchase_revenue_in_usd as revUsd
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+from ga_source_app,UNNEST(event_params) AS e
+where event_name IN ('purchase')
+AND e.key IN ('ga_session_id')
+)
+
+,pa as (
+select
+event_date
+,CONCAT(upid,eVal) AS sid
+,upid
+,count(distinct tid) as o
+,sum(qty) as q
+,sum(revUsd) as r
+from pa0
+group by all
+)
+
+
+------------------------------------------------------------------
+--join
+
+,j as ( --join list with purchase
+select * from tu
+left join ea USING (event_date,upid,sid)
+left join pa USING (event_date,upid,sid)
+)--select * from j
+
+------------------------------------------------------------------
+--output
+
+select
+PARSE_DATE('%Y%m%d', event_date) as event_date
+,exp as experiment_name
+,concat('v',var) as variant_name
+,count(distinct upid) as users
+,count(distinct sid) as sessions
+,count(distinct if(vit>0,sid,null) ) as pdp_sessions
+,count(distinct if(atc>0,sid,null) ) as atc_sessions
+,count(distinct if(che>0,sid,null) ) as checkout_sessions
+,sum(vit) as pdp_count
+,sum(atc) as atc_count
+,sum(che) as checkout_count
+,sum(o) as orders
+,sum(q) as qty
+,round(sum(r)*0.8,2) as revenue
+from j
+group by all
+order by sessions desc
+
+
+
