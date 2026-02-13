@@ -1,0 +1,83 @@
+
+--------------------------------------------------------------------
+--join fs with fdp - lp / country
+
+DECLARE datemin DATE DEFAULT '2024-08-01';
+DECLARE datemax DATE DEFAULT '2026-01-31';
+
+with fs as (
+select
+event_date as d
+,lower(country_code) as cc
+,case
+  when regexp_replace(regexp_replace(lower(session_start_page), '\\?.*' , '' ), '.*shark.com' , '' ) in ('/','/es-us','/pages/shop-women','/pages/shop-men') then 'home'
+  when regexp_contains(lower(session_start_page),'.*(/collections/).*') then 'plp'
+  when regexp_contains(lower(session_start_page),'.*(/products/).*') then 'pdp'
+  when regexp_contains(lower(session_start_page),'.*(/pages/).*') then 'hub'
+  when regexp_contains(lower(session_start_page),'.*(article/|blog|support).*') then 'blog/support'
+  else 'other'
+  end as lp_group
+,session_key as sid
+from gia-production-data-02636.gold.FACT_SESSIONS
+where (event_date between datemin and datemax)
+and event_type='WEB'
+group by all
+order by 1 desc
+)--select * from fs;
+
+,dp as (
+SELECT distinct
+event_date as dp_d
+,session_key as dp_sid
+,ecommerce_transaction_id as tid
+FROM `gia-production-data-02636.gold.FACT_DIGITAL_PURCHASE`
+WHERE session_key is not null
+AND ( EVENT_DATE BETWEEN datemin and datemax )
+)--select * from dp;
+
+,dt as(
+SELECT
+full_date as dt_d
+,USA_PRIMARY_DAY_TYPE as dt
+--,UK_PRIMARY_DAY_TYPE
+FROM `gia-production-data-02636.gold.DIM_DATE` where (full_date BETWEEN datemin and datemax ) order by 1
+)
+
+,j as (
+select * from fs
+left join dp on d=dp_d and sid=dp_sid
+left join dt on d=dt_d
+)--select * from j order by d desc, sid asc;
+
+select
+d,dt
+,CASE
+  WHEN (d BETWEEN '2022-08-01' AND '2023-07-31') THEN 'fy23'
+  WHEN (d BETWEEN '2023-08-01' AND '2024-07-31') THEN 'fy24'
+  WHEN (d BETWEEN '2024-08-01' AND '2025-07-31') THEN 'fy25'
+  WHEN (d BETWEEN '2025-08-01' AND '2026-07-31') THEN 'fy26'
+  WHEN (d BETWEEN '2026-08-01' AND '2027-07-31') THEN 'fy27'
+  ELSE 'tbc'
+  END AS fy
+,CASE
+  WHEN EXTRACT(MONTH FROM d) IN (8, 9, 10) THEN 'q1'
+  WHEN EXTRACT(MONTH FROM d) IN (11, 12, 1) THEN 'q2'
+  WHEN EXTRACT(MONTH FROM d) IN (2, 3, 4) THEN 'q3'
+  WHEN EXTRACT(MONTH FROM d) IN (5, 6, 7) THEN 'q4'
+  ELSE 'tbc'
+  END AS quarter
+,CASE
+  WHEN cc in ('au','ca','ch','de','dk','fi','fr','nl','no','se','uk','us') THEN cc
+  WHEN cc = 'gb' THEN 'uk'
+  WHEN cc = 'nz' THEN 'au'
+  WHEN cc = 'at' THEN 'de'
+  ELSE 'intl'
+  END AS country
+,lp_group
+,count(distinct sid) as sessions
+,count(distinct tid) as orders
+from j
+group by all order by 1 desc,sessions desc
+
+
+
