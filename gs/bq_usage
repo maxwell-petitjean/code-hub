@@ -1,0 +1,51 @@
+
+------------------------------------------------------------------------------
+--this query shows an over time view of spend by day
+
+SELECT
+--user_email
+extract(date from creation_time) as query_date
+,ROUND(SUM(total_bytes_processed) / POW(2, 40) * 5, 2) AS estimated_cost_usd
+FROM `region-europe-west2`.INFORMATION_SCHEMA.JOBS
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 60 DAY)
+AND job_type = 'QUERY'
+AND state = 'DONE'
+--AND user_email IN ('m.petitjean@gymshark.com','omar.keshta@gymshark.com','farazali.merchant@gymshark.com','emily.irvine@gymshark.com')
+AND user_email IN ('emily.irvine@gymshark.com')
+group by all order by 2 desc
+
+------------------------------------------------------------------------------
+--this shows you the specific query sorted by highest cost
+
+SELECT
+job_id
+,user_email
+,date(creation_time) as query_date
+,ROUND(SUM(total_bytes_processed) / POW(2, 40) * 5, 2) AS estimated_cost_usd
+,query
+,start_time
+,end_time
+,end_time-start_time as query_length_time
+FROM `region-europe-west2`.INFORMATION_SCHEMA.JOBS
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) --change date of lookback here
+AND job_type = 'QUERY'
+AND state = 'DONE'
+AND user_email IN ('emily.irvine@gymshark.com')
+group by all order by estimated_cost_usd desc
+
+------------------------------------------------------------------------------
+--checks sum of costs for all the users in the team over given date range
+
+SELECT
+user_email
+,ROUND(SUM(total_bytes_processed) / POW(2, 40) * 5, 2) AS estimated_cost_usd
+FROM `region-europe-west2`.INFORMATION_SCHEMA.JOBS
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY) --change date of lookback here
+AND job_type = 'QUERY'
+AND state = 'DONE'
+AND user_email IN ('m.petitjean@gymshark.com','omar.keshta@gymshark.com','farazali.merchant@gymshark.com','emily.irvine@gymshark.com')
+group by all order by 2 desc
+
+
+
+
