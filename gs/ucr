@@ -1,0 +1,186 @@
+
+DECLARE datemin DATE DEFAULT DATE '2022-08-01';
+DECLARE datemax DATE DEFAULT CURRENT_DATE()-1;
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+--monthly
+
+with ms as(
+select
+DATE_TRUNC(event_date, MONTH) as d
+,case when event_type='WEB' then 'web' else 'app' end as p
+,case when country_code in ('US','CA') then 'nam' else 'intl' end as r
+,count(distinct user_pseudo_id) as u
+,0 as o
+from gia-production-data-02636.gold.FACT_SESSIONS
+where ( event_date between '2022-08-01' and current_date()-1 )
+group by all
+)--select * from ms;
+
+,mo as(
+SELECT
+CAST(DATE_TRUNC(ORDER_TIMESTAMP_UTC, MONTH) AS DATE) AS d
+,CASE WHEN CHANNEL in ('ECOM_APP') THEN 'app' ELSE 'web' END as p
+,case when STORE_CODE in ('us','ca') then 'nam' else 'intl' end AS r
+,0 as u
+,COUNT(DISTINCT SHOPIFY_ORDER_NAME) as o
+FROM `gia-production-data-02636.gold.FACT_ORDER_JOURNEY`
+WHERE ( DATE(ORDER_TIMESTAMP_UTC) between '2022-08-01' and current_date()-1 )
+AND CHANNEL IN ('ECOM_APP','WEB')
+GROUP BY all
+)--select * from mo;
+
+,mu as(
+select * from ms union all select * from mo
+)--select * from mu;
+
+,mc as(
+select
+d as DATE,extract(month from d) as MONTH
+,case
+  when extract(month from d) in (8,9,10) then 'q1'
+  when extract(month from d) in (11,12,1) then 'q2'
+  when extract(month from d) in (2,3,4) then 'q3'
+  when extract(month from d) in (5,6,7) then 'q4'
+  else 'n/a' end as QUARTER
+,extract(year from d) as YEAR
+,case
+  when d between '2022-08-01' and '2023-07-31' then 'fy23'
+  when d between '2023-08-01' and '2024-07-31' then 'fy24'
+  when d between '2024-08-01' and '2025-07-31' then 'fy25'
+  when d between '2025-08-01' and '2026-07-31' then 'fy26'
+  when d between '2026-08-01' and '2027-07-31' then 'fy27'
+  when d between '2027-08-01' and '2028-07-31' then 'fy28'
+  else 'other'
+  end as FY
+,'monthly' as DAYTYPE
+,r as REGION, p as PRODUCT
+,sum(o) as ORDERS
+,sum(u) as ROLLINGUSERS
+from mu
+group by all order by 1 desc
+)--select * from mc;
+--DATE,MONTH,QUARTER,YEAR,FY,DAYTYPE,REGION,PRODUCT,ORDERS,ROLLINGUSERS
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+--quarterly
+
+,qs as(
+select
+case
+  when extract(month from event_date) in (8,9,10) then 'q1'
+  when extract(month from event_date) in (11,12,1) then 'q2'
+  when extract(month from event_date) in (2,3,4) then 'q3'
+  when extract(month from event_date) in (5,6,7) then 'q4'
+  else 'n/a' end as QUARTER
+,case
+  when event_date between '2022-08-01' and '2023-07-31' then 'fy23'
+  when event_date between '2023-08-01' and '2024-07-31' then 'fy24'
+  when event_date between '2024-08-01' and '2025-07-31' then 'fy25'
+  when event_date between '2025-08-01' and '2026-07-31' then 'fy26'
+  when event_date between '2026-08-01' and '2027-07-31' then 'fy27'
+  when event_date between '2027-08-01' and '2028-07-31' then 'fy28'
+  else 'other'
+  end as FY
+,case when event_type='WEB' then 'web' else 'app' end as p
+,case when country_code in ('US','CA') then 'nam' else 'intl' end as r
+,count(distinct user_pseudo_id) as u
+,0 as o
+from gia-production-data-02636.gold.FACT_SESSIONS
+where ( event_date between '2022-08-01' and current_date()-1 )
+group by all
+)--select * from qs;
+
+,qo as(
+SELECT
+case
+  when extract(month from ORDER_TIMESTAMP_UTC) in (8,9,10) then 'q1'
+  when extract(month from ORDER_TIMESTAMP_UTC) in (11,12,1) then 'q2'
+  when extract(month from ORDER_TIMESTAMP_UTC) in (2,3,4) then 'q3'
+  when extract(month from ORDER_TIMESTAMP_UTC) in (5,6,7) then 'q4'
+  else 'n/a' end as QUARTER
+,case
+  when CAST(ORDER_TIMESTAMP_UTC AS DATE) between '2022-08-01' and '2023-07-31' then 'fy23'
+  when CAST(ORDER_TIMESTAMP_UTC AS DATE) between '2023-08-01' and '2024-07-31' then 'fy24'
+  when CAST(ORDER_TIMESTAMP_UTC AS DATE) between '2024-08-01' and '2025-07-31' then 'fy25'
+  when CAST(ORDER_TIMESTAMP_UTC AS DATE) between '2025-08-01' and '2026-07-31' then 'fy26'
+  when CAST(ORDER_TIMESTAMP_UTC AS DATE) between '2026-08-01' and '2027-07-31' then 'fy27'
+  when CAST(ORDER_TIMESTAMP_UTC AS DATE) between '2027-08-01' and '2028-07-31' then 'fy28'
+  else 'other'
+  end as FY
+,CASE WHEN CHANNEL in ('ECOM_APP') THEN 'app' ELSE 'web' END as p
+,case when STORE_CODE in ('us','ca') then 'nam' else 'intl' end AS r
+,0 as u
+,COUNT(DISTINCT SHOPIFY_ORDER_NAME) as o
+FROM `gia-production-data-02636.gold.FACT_ORDER_JOURNEY`
+WHERE ( DATE(ORDER_TIMESTAMP_UTC) between '2022-08-01' and current_date()-1 )
+AND CHANNEL IN ('ECOM_APP','WEB')
+GROUP BY all
+)--select * from mo;
+
+,qu as(
+select * from qs union all select * from qo
+)--select * from qu order by 2 desc,1,3,4;
+
+,qc as(
+select
+case
+  when (quarter='q1' and fy='fy23') then cast('2022-08-01' as date) when (quarter='q2' and fy='fy23') then cast('2022-11-01' as date)
+  when (quarter='q3' and fy='fy23') then cast('2023-02-01' as date) when (quarter='q4' and fy='fy23') then cast('2023-05-01' as date)
+  when (quarter='q1' and fy='fy24') then cast('2023-08-01' as date) when (quarter='q2' and fy='fy24') then cast('2023-11-01' as date)
+  when (quarter='q3' and fy='fy24') then cast('2024-02-01' as date) when (quarter='q4' and fy='fy24') then cast('2024-05-01' as date)
+  when (quarter='q1' and fy='fy25') then cast('2024-08-01' as date) when (quarter='q2' and fy='fy25') then cast('2024-11-01' as date)
+  when (quarter='q3' and fy='fy25') then cast('2025-02-01' as date) when (quarter='q4' and fy='fy25') then cast('2025-05-01' as date)
+  when (quarter='q1' and fy='fy26') then cast('2025-08-01' as date) when (quarter='q2' and fy='fy26') then cast('2025-11-01' as date)
+  when (quarter='q3' and fy='fy26') then cast('2026-02-01' as date) when (quarter='q4' and fy='fy26') then cast('2026-05-01' as date)
+  when (quarter='q1' and fy='fy27') then cast('2026-08-01' as date) when (quarter='q2' and fy='fy27') then cast('2026-11-01' as date)
+  when (quarter='q3' and fy='fy27') then cast('2027-02-01' as date) when (quarter='q4' and fy='fy27') then cast('2027-05-01' as date)
+  else cast('other' as date)
+  end as DATE
+,0 as MONTH
+,QUARTER
+,0 as YEAR
+,FY
+,'quarterly' as DAYTYPE
+,r as REGION, p as PRODUCT
+,sum(o) as ORDERS
+,sum(u) as ROLLINGUSERS
+from qu
+group by all order by 1 desc
+)--select * from qc;
+--DATE,MONTH,QUARTER,YEAR,FY,DAYTYPE,REGION,PRODUCT,ORDERS,ROLLINGUSERS
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+--annual tbc
+
+
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+--join
+
+,j as (
+select * from mc union all
+select * from qc
+)
+
+select DATE,lower(QUARTER) as QUARTER,MONTH,YEAR,FY,DAYTYPE,REGION,PRODUCT
+,SUM(ORDERS) as ORDERS
+,SUM(ROLLINGUSERS) as ROLLINGUSERS
+from j
+group by all order by 1 desc,4,5,7;
+
+
+
+
+
+
+
+
+
+
+
+
