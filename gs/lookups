@@ -1,0 +1,57 @@
+
+--LOOKUPS
+
+
+--COUNTRY
+,CASE
+  WHEN country = 'United Kingdom' THEN 'uk'
+  WHEN country = 'United States' THEN 'us'
+  WHEN country = 'Netherlands' THEN 'nl'
+  WHEN country = 'France' THEN 'fr'
+  WHEN country = 'Germany' THEN 'de'
+  WHEN country = 'Austria' THEN 'de'
+  WHEN country = 'Canada' THEN 'ca'
+  WHEN country = 'Australia' THEN 'au'
+  WHEN country = 'New Zealand' THEN 'au'
+  WHEN country = 'Norway' THEN 'no'
+  WHEN country = 'Sweden' THEN 'se'
+  WHEN country = 'Finland' THEN 'fi'
+  WHEN country = 'Switzerland' THEN 'ch'
+  WHEN country = 'Denmark' THEN 'dk'
+  ELSE 'intl'
+  END AS country
+
+--COUNTRY_CODE from lower
+,CASE
+  WHEN cc in ('au','ca','ch','de','dk','fi','fr','nl','no','se','uk','us') THEN cc
+  WHEN cc = 'gb' THEN 'uk'
+  WHEN cc = 'nz' THEN 'au'
+  WHEN cc = 'at' THEN 'de'
+  ELSE 'intl'
+  END AS country
+
+
+--JOURNEY STEP FOR CHIEFS
+,CASE
+  WHEN action in ('page_view','view_promotion') THEN 'homeView'
+  WHEN action in ('homepage','select_promotion') THEN 'homeClick'
+  WHEN action in ('view_item_list','listView') THEN 'listView'
+  WHEN action in ('select_item','listClick') THEN 'listClick'
+  WHEN action in ('view_item') THEN 'productView'
+  WHEN action in ('add_to_cart') THEN 'addToCart'
+  WHEN action in ('begin_checkout') THEN 'checkoutStart'
+  ELSE 'action' END as journeystep
+
+--URL mapping
+CASE
+  WHEN REGEXP_MATCH(URL,'.*(all-prod).*') THEN "all_products"
+  WHEN REGEXP_MATCH(URL,'.*(new-).*') THEN "new_releases"
+  WHEN REGEXP_MATCH(URL,'.*(access|bags|sock|underw|equip|backp|bott|caps|headw).*') THEN "accessories"
+  WHEN REGEXP_MATCH(URL,'.*(running|lifting|functio|yoga|tennis|rest-day|hiit|athleis|class|lounge|bodyb|conditi|pilates).*') THEN "activity"
+  WHEN REGEXP_MATCH(URL,'.*(everyw|arrival|sport/|sweat/|phys-ed|legacy|studio|speed|whitney|adapt|leana|apex|seamles|graphic|power).*') THEN "collection"
+  WHEN REGEXP_MATCH(URL,'.*(zip|ruch|overs|cargo|outer|mesh|pocket|squat|high).*') THEN "fit"
+  WHEN REGEXP_MATCH(URL,'.*(gift).*') THEN "gift"
+  WHEN REGEXP_MATCH(URL,'.*(outlet| under|over|deal|bucket|last-chance|bundle|sale).*') THEN "sale"
+  WHEN REGEXP_MATCH(URL,'.*(father|mother|hallow|modernw|valent|christmas|must-have|match|trading|tracks|wish|hijab|seasonal|all-roun|chris-b|black|modest|trend|back-to|analis|david-laid|pink|essential).*') THEN "trending"
+  ELSE 'product_category'
+END
