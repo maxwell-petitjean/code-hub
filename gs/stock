@@ -1,0 +1,119 @@
+
+DECLARE datemin STRING DEFAULT '20251101';
+DECLARE datemax STRING DEFAULT '20251101';
+
+WITH ga4_temp AS (
+  SELECT * 
+  FROM `gymshark-rollup-5712.analytics_261499685.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN datemin AND datemax
+)
+
+,vi AS 
+(
+  SELECT DISTINCT -- view items
+    event_date,
+    user_pseudo_id AS upid,
+    CONCAT(CAST(user_pseudo_id AS STRING), CAST(event_timestamp AS STRING)) AS stamp,
+    LOWER(event_name) AS evName,
+    e.key AS eKey,
+    COALESCE(
+      e.value.string_value,
+      CAST(e.value.int_value AS STRING),
+      CAST(e.value.float_value AS STRING),
+      CAST(e.value.double_value AS STRING)
+    ) AS eVal,
+    LOWER(TRIM(i.item_category)) AS prodCat,
+    LOWER(TRIM(i.item_name)) AS prodName,
+    LOWER(TRIM(i.item_variant)) AS prodCol
+  FROM ga4_temp, UNNEST(items) AS i, UNNEST(event_params) AS e
+  WHERE event_name = 'view_item'
+    AND e.key IN ('cd_website', 'cd_productTag', 'cd_stockPercent')
+    AND user_pseudo_id IS NOT NULL
+)
+-- select * from vi;
+,v0 AS ( -- pivot events
+  SELECT
+    event_date,
+    evName,
+    upid,
+    stamp,
+    prodCat,
+    prodName,
+    prodCol,
+    CASE WHEN eKey = 'cd_website' THEN LOWER(eVal) ELSE NULL END AS key1,
+    CASE WHEN eKey = 'cd_productTag' THEN UPPER(eVal) ELSE NULL END AS key2,
+    CASE WHEN eKey = 'cd_stockPercent' THEN eVal ELSE NULL END AS key3
+  FROM vi
+)
+-- select * from v0;
+,v1 AS (SELECT DISTINCT event_date, evName, upid, stamp, prodCat, prodName, prodCol, key1 FROM v0 WHERE key1 IS NOT NULL) --select * from v1;
+,v2 AS (SELECT DISTINCT event_date, evName, upid, stamp, prodCat, prodName, prodCol, key2 FROM v0 WHERE key2 IS NOT NULL) --select * from v2;
+,v3 AS (SELECT DISTINCT event_date, evName, upid, stamp, prodCat, prodName, prodCol, key3 FROM v0 WHERE key3 IS NOT NULL) --select * from v3;
+
+,v5 AS ( -- join v1,v2,v3
+  SELECT
+    v1.event_date,
+    v1.upid,
+    v1.stamp,
+    v1.prodCat,
+    v1.prodName,
+    v1.prodCol,
+    key1 AS country,
+    key2 AS tag,
+    key3 AS stock_percent
+  FROM v1
+  LEFT JOIN v2 USING (event_date, upid, stamp, prodCat, prodName, prodCol)
+  LEFT JOIN v3 USING (event_date, upid, stamp, prodCat, prodName, prodCol)
+)
+-- select * from v5;
+,event_item_params AS ( --edit date to right format
+  SELECT
+    PARSE_DATE('%Y%m%d', event_date) AS event_date,
+    upid,
+    stamp,
+    prodCat,
+    prodName,
+    prodCol,
+    country,
+    tag,
+    stock_percent
+  FROM v5
+)
+-- select * from event_item_params;
+,final_agg AS (
+  SELECT
+    event_date,
+    prodCat,
+    prodName,
+    prodCol,
+    country,
+    CASE
+      WHEN LOWER(tag) IN ('neu', 'nouveau') THEN 'new'
+      WHEN tag IS NOT NULL AND REGEXP_CONTAINS(tag, '(?i).*(off|save).*') THEN 'discounted'
+      WHEN LOWER(tag) IN ('null', 'new', 'out of stock') THEN LOWER(tag)
+      ELSE 'other'
+    END AS tag_name,
+    COUNT(DISTINCT upid) AS users,
+    COUNT(stamp) AS events,
+    SUM(SAFE_CAST(stock_percent AS NUMERIC)) AS stock_sum,
+    ROUND(SUM(SAFE_CAST(stock_percent AS NUMERIC)) / NULLIF(COUNT(stamp), 0), 2) AS avg_stock
+  FROM event_item_params
+  WHERE country IN ('au', 'ca', 'ch', 'de', 'dk', 'eu', 'fi', 'fr', 'nl', 'no', 'ro', 'se', 'uk', 'us')
+  GROUP BY 1, 2, 3, 4, 5, 6
+)
+
+SELECT
+  event_date AS EVENT_DATE,
+  prodCat AS PRODCAT,
+  prodName AS PRODNAME,
+  prodCol AS PRODCOL,
+  country AS COUNTRY,
+  tag_name AS TAG_NAME,
+  CAST(users AS INT64) AS USERS,
+  CAST(events AS INT64) AS EVENTS,
+  CAST(stock_sum AS FLOAT64) AS STOCK_SUM,
+  CAST(avg_stock AS FLOAT64) AS AVG_STOCK
+FROM final_agg
+WHERE users > 0;
+
+
