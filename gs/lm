@@ -1,0 +1,467 @@
+
+DECLARE datemin DATE DEFAULT CURRENT_DATE() - 3; --FIRST DAY IN RANGE - ROLLING DATES
+DECLARE datemax DATE DEFAULT CURRENT_DATE() - 1; --LAST DAY IN RANGE - ROLLING DATES
+
+-- DECLARE datemin DATE DEFAULT DATE '2025-12-22'; --FIRST DAY IN RANGE - SELECTED DATES
+-- DECLARE datemax DATE DEFAULT DATE '2025-12-23'; --LAST DAY IN RANGE - SELECTED DATES
+
+--DELETE & INSERT fresh data
+-- DELETE FROM `gia-production-data-02636.gold.FACT_PLP_FILTER_SELECTION` WHERE (EVENT_DATE BETWEEN datemin and datemax);
+-- INSERT INTO `gia-production-data-02636.gold.FACT_PLP_FILTER_SELECTION`
+-- (EVENT_DATE, PRODUCT, EVENT, FILTER, PATH, PAGE_GROUP, COUNTRY,MONTH, YEAR, FY, HALF, QUARTER,USERS, SESSIONS, ATC_SESSIONS, CHECKOUT_SESSIONS, ORDERS, REVENUE,FILTER_GROUP, FILTER_AND_GROUP)
+
+-------------------------------------------------------------------------
+--RAW DATA
+
+WITH ga_source_app AS (
+--SELECT * FROM `gia-production-int-27149.iceberg_bronze.ga_analytics_254794223`
+SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_254794223`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax )
+)
+
+,ga_source_web AS (
+--SELECT * FROM `gia-production-int-27149.iceberg_bronze.analytics_261499685`
+SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_261499685`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax )
+)
+
+-------------------------------------------------------------------------
+--PULL APP EVENTS
+
+,app AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,geo.country
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+from ga_source_app,UNNEST(event_params) AS e
+where event_name IN ('ui_interaction')
+and e.key in ('screen_name','element_name','value','ga_session_id')
+)
+
+,a0 AS (
+SELECT
+event_date,country
+,upid
+,stamp
+,CASE WHEN eKey = 'ga_session_id' THEN LOWER(eVal) ELSE NULL END AS key1
+,CASE WHEN eKey = 'element_name' THEN LOWER(eVal) ELSE NULL END AS key2
+,CASE WHEN eKey = 'screen_name' THEN LOWER(eVal) ELSE NULL END AS key3
+,CASE WHEN eKey = 'value' THEN LOWER(eVal) ELSE NULL END AS key4
+FROM app
+)
+
+,a1 AS (SELECT DISTINCT event_date, country, upid, stamp, key1 FROM a0 WHERE key1 IS NOT NULL)
+,a2 AS (SELECT DISTINCT event_date, country, upid, stamp, key2 FROM a0 WHERE key2 IS NOT NULL)
+,a3 AS (SELECT DISTINCT event_date, country, upid, stamp, key3 FROM a0 WHERE key3 IS NOT NULL)
+,a4 AS (SELECT DISTINCT event_date, country, upid, stamp, key4 FROM a0 WHERE key4 IS NOT NULL)
+
+,a5 AS (
+SELECT
+a1.event_date,a1.country
+,a1.upid
+,CONCAT(a1.upid,key1) AS sid
+,a1.stamp
+,key2,key3,key4
+FROM a1
+LEFT JOIN a2 USING (event_date, upid, stamp)
+LEFT JOIN a3 USING (event_date, upid, stamp)
+LEFT JOIN a4 USING (event_date, upid, stamp)
+)
+
+,a AS (
+SELECT
+event_date,upid,sid,country
+,key2
+,key3
+,CASE
+  WHEN REGEXP_CONTAINS( key3,'.*(search).*') THEN 'search'
+  WHEN REGEXP_CONTAINS( key3,'.*(plp).*') THEN 'plp'
+  ELSE 'other'
+  END AS page_group
+,key4
+,COUNT(DISTINCT stamp) AS clicks
+FROM a5
+where key2='plp_filter' and REGEXP_CONTAINS( key3,'.*(plp|search).*') and key4 != 'open'
+GROUP BY all
+)
+
+,ea0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+from ga_source_app,UNNEST(event_params) AS e
+where event_name IN ('add_to_cart','begin_checkout')
+AND e.key IN ('ga_session_id')
+)
+
+,ea1 as (
+select
+event_date
+,upid
+,CONCAT(upid,eVal) AS sid
+,case when evName in ('add_to_cart') then 1 else 0 end as a1
+,case when evName in ('begin_checkout') then 1 else 0 end as c1
+,sum(case when evName in ('add_to_cart') then 1 else 0 end) as a2
+,sum(case when evName in ('begin_checkout') then 1 else 0 end) as c2
+from ea0
+group by all
+)
+
+,ea as(
+select
+event_date,upid,sid
+,sum(a1) as atc,sum(c1) as checkout,sum(a2) as atcCount,sum(c2) as checkoutCount
+from ea1
+group by all
+)
+
+,oa0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,LOWER(event_name) AS evName
+,ecommerce.transaction_id as tid
+,ecommerce.total_item_quantity as qty
+,ecommerce.purchase_revenue_in_usd as revUsd
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+from ga_source_app,UNNEST(event_params) AS e
+where event_name IN ('purchase')
+AND e.key IN ('ga_session_id')
+)
+
+,oa as (
+select
+event_date
+,CONCAT(upid,eVal) AS sid
+,upid
+,count(distinct tid) as o
+,sum(qty) as q
+,sum(revUsd) as r
+from oa0
+group by all
+)
+
+,ja as
+(
+select
+a.event_date
+,a.sid
+,a.upid
+,a.country
+,a.key2 as event
+,a.key4 as filter
+,a.key3 as path
+,a.page_group
+,a.clicks
+,ea.atc
+,ea.checkout
+,oa.o
+,oa.q
+,oa.r
+from a
+left join ea using (sid,upid,event_date)
+left join oa using (sid,upid,event_date)
+)--select * from ja
+
+-------------------------------------------------------------------------
+--PULL WEB EVENTS
+
+,web AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,geo.country
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+from ga_source_web,UNNEST(event_params) AS e
+where event_name IN ('plp')
+AND e.key in ('page_location','element_name','element_value','ga_session_id')
+)
+
+,w0 AS (
+SELECT
+event_date,country
+,upid
+,stamp
+,CASE WHEN eKey = 'page_location' THEN LOWER(eVal) ELSE NULL END AS key1
+,CASE WHEN eKey = 'element_name' THEN LOWER(eVal) ELSE NULL END AS key2
+,CASE WHEN eKey = 'element_value' THEN LOWER(eVal) ELSE NULL END AS key3
+,CASE WHEN eKey = 'ga_session_id' THEN LOWER(eVal) ELSE NULL END AS key4
+FROM web
+)
+
+,w1 AS (SELECT DISTINCT event_date, country, upid, stamp, key1 FROM w0 WHERE key1 IS NOT NULL)
+,w2 AS (SELECT DISTINCT event_date, country, upid, stamp, key2 FROM w0 WHERE key2 IS NOT NULL)
+,w3 AS (SELECT DISTINCT event_date, country, upid, stamp, key3 FROM w0 WHERE key3 IS NOT NULL)
+,w4 AS (SELECT DISTINCT event_date, country, upid, stamp, key4 FROM w0 WHERE key4 IS NOT NULL)
+
+,w5 AS (
+SELECT
+w1.event_date,w1.country,
+w1.upid,
+CONCAT(w1.upid,w4.key4) AS sid,
+w1.stamp,
+w1.key1,
+w2.key2,
+w3.key3
+FROM w1
+LEFT JOIN w2 USING (event_date, upid, stamp)
+LEFT JOIN w3 USING (event_date, upid, stamp)
+LEFT JOIN w4 USING (event_date, upid, stamp)
+)
+
+,w AS (
+SELECT
+event_date,upid,sid,country
+,key2
+,key3
+,case when key2='link-cards' then REGEXP_REPLACE(key3,'.*(shark.com/)','') else key3 end as filter
+,REGEXP_REPLACE(REGEXP_REPLACE(key1, '.*(shark.com/)', '/') ,'(\\?).*','') as path
+,CASE
+WHEN REGEXP_REPLACE(REGEXP_REPLACE(key1, '.*(shark.com/)', '/') ,'(\\?).*','') IN ('/', '/es-us') THEN 'home'
+WHEN REGEXP_CONTAINS( key1,'.*(/search).*') THEN 'search'
+WHEN REGEXP_CONTAINS( key1,'.*(/collections/).*') THEN 'plp'
+WHEN REGEXP_CONTAINS( key1,'.*(/products/).*') THEN 'pdp'
+WHEN REGEXP_CONTAINS( key1,'.*(/pages/).*') THEN 'hub'
+ELSE 'other'
+END AS page_group
+,COUNT(DISTINCT stamp) AS clicks
+FROM w5
+where key2 in ('filters_selection','link-cards')
+and REGEXP_CONTAINS( key1,'.*(/collections/|/search).*')
+GROUP BY all
+)
+
+,ew0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+from ga_source_web,UNNEST(event_params) AS e
+where event_name IN ('add_to_cart','begin_checkout')
+AND e.key IN ('ga_session_id')
+)
+
+,ew1 as (
+select
+event_date
+,upid
+,CONCAT(upid,eVal) AS sid
+,case when evName in ('add_to_cart') then 1 else 0 end as a1
+,case when evName in ('begin_checkout') then 1 else 0 end as c1
+,sum(case when evName in ('add_to_cart') then 1 else 0 end) as a2
+,sum(case when evName in ('begin_checkout') then 1 else 0 end) as c2
+from ew0
+group by all
+)
+
+,ew as(
+select
+event_date,upid,sid
+,sum(a1) as atc,sum(c1) as checkout,sum(a2) as atcCount,sum(c2) as checkoutCount
+from ew1
+group by all
+)
+
+,ow0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,LOWER(event_name) AS evName
+,ecommerce.transaction_id as tid
+,ecommerce.total_item_quantity as qty
+,ecommerce.purchase_revenue_in_usd as revUsd
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+from ga_source_web,UNNEST(event_params) AS e
+where event_name IN ('purchase')
+AND e.key IN ('ga_session_id')
+)
+
+,ow as (
+select
+event_date
+,CONCAT(upid,eVal) AS sid
+,upid
+,count(distinct tid) as o
+,sum(qty) as q
+,sum(revUsd) as r
+from ow0
+group by all
+)
+
+,jw as
+(
+select
+w.event_date
+,w.sid
+,w.upid
+,w.country
+,regexp_replace(w.key2,' |-','_') as event
+,REGEXP_REPLACE(REGEXP_REPLACE(w.filter,'(es-us/)','') ,'(\\?).*','') as filter
+,w.path
+,w.page_group
+,w.clicks
+,ew.atc
+,ew.checkout
+,ow.o
+,ow.q
+,ow.r
+from w
+left join ew using (sid,upid,event_date)
+left join ow using (sid,upid,event_date)
+)
+
+-------------------------------------------------------------------------
+--UNION
+,u AS (
+select * from ja
+union all
+select * from jw
+)--select* from u;
+
+SELECT
+PARSE_DATE('%Y%m%d', event_date) AS event_date
+,case when event='plp_filter' then 'app' else 'web' end as product
+,event
+,filter
+,path
+,page_group
+,CASE
+  WHEN country = 'United Kingdom' THEN 'uk'
+  WHEN country = 'United States' THEN 'us'
+  WHEN country = 'Netherlands' THEN 'nl'
+  WHEN country = 'France' THEN 'fr'
+  WHEN country = 'Germany' THEN 'de'
+  WHEN country = 'Austria' THEN 'de'
+  WHEN country = 'Canada' THEN 'ca'
+  WHEN country = 'Australia' THEN 'au'
+  WHEN country = 'New Zealand' THEN 'au'
+  WHEN country = 'Norway' THEN 'no'
+  WHEN country = 'Sweden' THEN 'se'
+  WHEN country = 'Finland' THEN 'fi'
+  WHEN country = 'Switzerland' THEN 'ch'
+  WHEN country = 'Denmark' THEN 'dk'
+  ELSE 'intl'
+  END AS country
+,CAST(EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) AS STRING) AS month
+,CAST(EXTRACT(YEAR FROM PARSE_DATE('%Y%m%d', event_date)) AS STRING) AS year
+,CASE
+  WHEN (PARSE_DATE('%Y%m%d', event_date) BETWEEN '2022-08-01' AND '2023-07-31') THEN 'fy23'
+  WHEN (PARSE_DATE('%Y%m%d', event_date) BETWEEN '2023-08-01' AND '2024-07-31') THEN 'fy24'
+  WHEN (PARSE_DATE('%Y%m%d', event_date) BETWEEN '2024-08-01' AND '2025-07-31') THEN 'fy25'
+  WHEN (PARSE_DATE('%Y%m%d', event_date) BETWEEN '2025-08-01' AND '2026-07-31') THEN 'fy26'
+  WHEN (PARSE_DATE('%Y%m%d', event_date) BETWEEN '2026-08-01' AND '2027-07-31') THEN 'fy27'
+  WHEN (PARSE_DATE('%Y%m%d', event_date) BETWEEN '2027-08-01' AND '2028-07-31') THEN 'fy28'
+  ELSE 'tbc'
+  END AS fy
+,CASE
+  WHEN EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) IN (8,9,10,11,12,1) THEN 'h1'
+  WHEN EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) IN (2,3,4,5,6,7) THEN 'h2'
+  ELSE 'tbc'
+  END AS half
+,CASE
+  WHEN EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) IN (8,9,10) THEN 'q1'
+  WHEN EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) IN (11,12,1) THEN 'q2'
+  WHEN EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) IN (2,3,4) THEN 'q3'
+  WHEN EXTRACT(MONTH FROM PARSE_DATE('%Y%m%d', event_date)) IN (5,6,7) THEN 'q4'
+  ELSE 'tbc'
+  END AS quarter
+,count(distinct upid) as users
+,count(distinct sid) as sessions
+,SUM(atc) as atc_sessions
+,SUM(checkout) as checkout_sessions
+,SUM(o) as orders
+,round( SUM(r)*0.8 ,2) as revenue
+,case
+  when event='link_cards' then event
+  when regexp_contains(filter,'(fit-).*|.*(_f:).*') then 'fit'
+  when regexp_contains(filter,'(range-).*|.*(_ran:).*') then 'collections'
+  when regexp_contains(filter,'(activities-).*|.*(_act:).*') then 'activities'
+  when regexp_contains(filter,'(sizeinstock-).*|.*(_si:).*') then 'size'
+  when regexp_contains(filter,'(gender).*|.*(_g:).*') then 'gender'
+  when regexp_contains(filter,'(price-).*|.*(_p:).*') then 'price'
+  when regexp_contains(filter,'(features-).*|.*(_fe:).*') then 'features'
+  when regexp_contains(filter,'(collections-).*|.*(_g:).*') then 'category'
+  when regexp_contains(filter,'(discountpercentage-).*|.*(_d:).*') then 'discount'
+  when regexp_contains(filter,'(pattern-).*|.*(_pa:).*') then 'pattern'
+  when regexp_contains(filter,'(colour-).*|.*(_c:).*') then 'colour'
+  when regexp_contains(filter,'(sortby).*|(so:lth|so:htl|so:newest|newest|lth|htl).*') then 'sort'
+  when filter in ('black','blue','grey','brown','red','pink','green','white','purple','teal','yellow') then 'colour'
+  else 'other'
+  end as filter_group
+,concat(
+  --filter_group
+  (case
+  when event='link_cards' then event
+  when regexp_contains(filter,'(fit-).*|.*(_f:).*') then 'fit'
+  when regexp_contains(filter,'(range-).*|.*(_ran:).*') then 'collections'
+  when regexp_contains(filter,'(activities-).*|.*(_act:).*') then 'activities'
+  when regexp_contains(filter,'(sizeinstock-).*|.*(_si:).*') then 'size'
+  when regexp_contains(filter,'(gender).*|.*(_g:).*') then 'gender'
+  when regexp_contains(filter,'(price-).*|.*(_p:).*') then 'price'
+  when regexp_contains(filter,'(features-).*|.*(_fe:).*') then 'features'
+  when regexp_contains(filter,'(collections-).*|.*(_g:).*') then 'category'
+  when regexp_contains(filter,'(discountpercentage-).*|.*(_d:).*') then 'discount'
+  when regexp_contains(filter,'(pattern-).*|.*(_pa:).*') then 'pattern'
+  when regexp_contains(filter,'(colour-).*|.*(_c:).*') then 'colour'
+  when regexp_contains(filter,'(sortby).*|(so:lth|so:htl|so:newest|newest|lth|htl).*') then 'sort'
+  when filter in ('black','blue','grey','brown','red','pink','green','white','purple','teal','yellow') then 'colour'
+  else 'other' end)
+  ,'_',filter
+) as filter_and_group
+FROM u
+GROUP BY all
+order by sessions desc
+
+
+
+
+
+
+
+
