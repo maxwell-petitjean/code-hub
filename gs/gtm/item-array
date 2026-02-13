@@ -1,0 +1,31 @@
+function(){
+var products = google_tag_manager["GTM-WQXVFFG"].dataLayer.get("ecommerce").purchase.products || [];
+var array = [];
+
+function safeStr(v) {
+  return (typeof v === "string") ? v.trim().toLowerCase() : "";
+}
+
+function safeNum(v) {
+  if (typeof v === "number" && !isNaN(v)) return v;
+  if (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v))) {
+    return Number(v);
+  }
+  return null;
+}
+  
+products.forEach(function(e,i){
+  array.push({
+    item_id: safeNum(e.id),
+    item_name: safeStr(e.name).replace(/(&quot;)|(")/g, ""),
+    item_category: safeStr(e.category),
+    item_variant: safeStr(e.dimension21),
+    price: e.price,
+    quantity: e.quantity,
+    cd_variant_id: e.variant,
+    cd_size: safeStr(e.dimension20),
+    cd_sku: e.sku
+  });
+})
+return array
+}
