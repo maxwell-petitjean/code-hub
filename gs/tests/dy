@@ -1,0 +1,208 @@
+
+-------------------------------------------------------------------------
+--RAW DATA - TEMP
+
+-- DECLARE datemin DATE DEFAULT CURRENT_DATE() - 3; --FIRST DAY IN RANGE - ROLLING DATES
+-- DECLARE datemax DATE DEFAULT CURRENT_DATE() - 1; --LAST DAY IN RANGE - ROLLING DATES
+
+-- WITH ga_source_web AS ( SELECT * FROM `gia-production-data-02636.transactions_tmp.analytics_261499685`
+-- WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax ) )
+
+-------------------------------------------------------------------------
+--RAW DATA - BRONZE
+
+DECLARE datemin DATE DEFAULT DATE '2026-02-03'; --FIRST DAY IN RANGE - SELECTED DATES
+DECLARE datemax DATE DEFAULT DATE '2026-02-08'; --LAST DAY IN RANGE - SELECTED DATES
+
+WITH ga_source_web AS ( SELECT * FROM `gia-production-int-27149.iceberg_bronze.analytics_261499685`
+WHERE (PARSE_DATE('%Y%m%d', event_date) BETWEEN datemin and datemax ) )
+
+-------------------------------------------------------------------------
+--EVENTS DATA
+
+,test_users AS --all dy events
+(
+SELECT DISTINCT
+event_date
+,user_pseudo_id as upid
+, CONCAT(CAST(user_pseudo_id AS STRING),CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+from ga_source_web,unnest(event_params) AS e
+where event_name in ('dy_impression')
+and e.key in ('ga_session_id','page_location','campaignID','variationID')
+and user_pseudo_id is not null
+)
+
+,t0 AS ( --match up sid with page
+SELECT
+event_date,evName,upid,stamp
+,CASE WHEN eKey = 'ga_session_id' THEN LOWER(eVal) ELSE NULL END AS key1
+,CASE WHEN eKey = 'page_location' THEN LOWER(eVal) ELSE NULL END AS key2
+,CASE WHEN eKey = 'campaignID' THEN LOWER(eVal) ELSE NULL END AS key3
+,CASE WHEN eKey = 'variationID' THEN LOWER(eVal) ELSE NULL END AS key4
+FROM test_users
+)
+
+,t1 AS (SELECT DISTINCT event_date,evName,upid,stamp,key1 FROM t0 WHERE key1 IS NOT NULL)
+,t2 AS (SELECT DISTINCT event_date,evName,upid,stamp,key2 FROM t0 WHERE key2 IS NOT NULL)
+,t3 AS (SELECT DISTINCT event_date,evName,upid,stamp,key3 FROM t0 WHERE key3 IS NOT NULL)
+,t4 AS (SELECT DISTINCT event_date,evName,upid,stamp,key4 FROM t0 WHERE key4 IS NOT NULL)
+
+,t5 AS ( --join different dimensions
+SELECT
+t1.event_date,t1.evName,t1.upid,t1.stamp
+,concat(t1.upid,key1) as sid
+,key2
+,right(left(key2,10),2) as cc
+,regexp_replace(regexp_replace(key2,'(\\?).*',''),'.*(shark.com)','') as path
+,key3 as camId
+,key4 as varId
+FROM t1
+LEFT JOIN t2 USING (event_date,upid,stamp)
+LEFT JOIN t3 USING (event_date,upid,stamp)
+LEFT JOIN t4 USING (event_date,upid,stamp)
+)--select * from t5;
+
+,tu AS ( --impression & click events by item
+SELECT
+event_date,camId,varId
+,CASE
+  WHEN cc in ('au','ca','ch','de','dk','fi','fr','nl','no','se','uk','us') THEN cc
+  WHEN cc = 'gb' THEN 'uk'
+  WHEN cc = 'nz' THEN 'au'
+  WHEN cc = 'at' THEN 'de'
+  ELSE 'intl'
+  END AS country
+--,path
+,upid,sid
+,COUNT(DISTINCT stamp) AS events
+from t5
+where camId = '1432989' -- enter campaign Id here
+and regexp_contains(path,'.*(/products/).*') --put any page stipulations here
+group by all
+)--select * from tu;
+
+
+--------------------------------------------------------------------------------
+--key events: vi / atc / checkout
+
+,ea0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,CONCAT(user_pseudo_id,CAST(event_timestamp AS STRING),CAST(batch_event_index AS STRING)) AS stamp
+,LOWER(event_name) AS evName
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+) AS eVal
+from ga_source_web,UNNEST(event_params) AS e
+where event_name IN ('view_item','add_to_cart','begin_checkout')
+AND e.key IN ('ga_session_id')
+)
+
+,ea1 as (
+select
+event_date
+,upid
+,CONCAT(upid,eVal) AS sid
+
+,sum(case when evName in ('view_item') then 1 else 0 end) as v1
+,sum(case when evName in ('add_to_cart') then 1 else 0 end) as a1
+,sum(case when evName in ('begin_checkout') then 1 else 0 end) as c1
+
+from ea0
+group by all
+)
+
+,ea as(
+select
+event_date,upid,sid
+,sum(v1) as vit
+,sum(a1) as atc
+,sum(c1) as che
+from ea1
+group by all
+)
+
+--------------------------------------------------------------------------------
+--purchase
+
+,pa0 AS (
+SELECT DISTINCT
+event_date
+,user_pseudo_id AS upid
+,LOWER(event_name) AS evName
+,ecommerce.transaction_id as tid
+,ecommerce.total_item_quantity as qty
+,ecommerce.purchase_revenue_in_usd as revUsd
+,e.key AS eKey
+,COALESCE(
+  e.value.string_value,
+  CAST(e.value.int_value   AS STRING),
+  CAST(e.value.float_value AS STRING),
+  CAST(e.value.double_value AS STRING)
+  ) AS eVal
+from ga_source_web,UNNEST(event_params) AS e
+where event_name IN ('purchase')
+AND e.key IN ('ga_session_id')
+)
+
+,pa as (
+select
+event_date
+,CONCAT(upid,eVal) AS sid
+,upid
+,count(distinct tid) as o
+,sum(qty) as q
+,sum(revUsd) as r
+from pa0
+group by all
+)
+
+
+------------------------------------------------------------------
+--join
+
+,j as ( --join list with purchase
+select * from tu
+left join ea USING (event_date,upid,sid)
+left join pa USING (event_date,upid,sid)
+)--select * from j
+
+------------------------------------------------------------------
+--output
+
+select
+PARSE_DATE('%Y%m%d', event_date) as event_date
+,camId as experiment_id
+,varId as variant_id
+,count(distinct upid) as users
+,count(distinct sid) as sessions
+,count(distinct if(vit>0,sid,null) ) as pdp_sessions
+,count(distinct if(atc>0,sid,null) ) as atc_sessions
+,count(distinct if(che>0,sid,null) ) as checkout_sessions
+,sum(vit) as pdp_count
+,sum(atc) as atc_count
+,sum(che) as checkout_count
+,sum(o) as orders
+,sum(q) as qty
+,round(sum(r)*0.8,2) as revenue
+from j
+group by all
+order by sessions desc
+
+
+
+
+
